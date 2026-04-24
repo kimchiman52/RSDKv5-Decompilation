@@ -3,7 +3,8 @@
 // Every public entry point logs via PrintLog() and returns. No hardware
 // touched. No /dev/mem. Pixel output lands in Phase 2 via NativeVideoWriter.
 //
-// This file is textually `#include`d by Drawing.cpp (see Drawing.cpp:132-144),
+// This file is textually `#include`d by Drawing.cpp (see the
+// `#if RETRO_RENDERDEVICE_*` chain at Drawing.cpp:132-146, MiSTer arm on 144),
 // so the RSDK:: namespace is already active and every common header
 // (RetroEngine.hpp, types, PrintLog, videoSettings, isRunning, SCREEN_YSIZE,
 // etc.) is already visible. Do NOT add #include directives here.
@@ -55,6 +56,11 @@ void RenderDevice::InitVertexBuffer()
 void RenderDevice::GetDisplays()
 {
     PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::GetDisplays() [stub]");
+    // INVARIANT: keep `displayInfo.displays` populated before setting
+    // `displayCount` non-zero. Drawing.cpp:313-349 iterates
+    // `displayInfo.displays[0..displayCount-1]` unconditionally and will NULL-
+    // deref if `displayCount > 0` while `displays == nullptr`. Phase 2
+    // implementers: allocate `displays[]` first, then assign `displayCount`.
     displayCount = 0;
 }
 

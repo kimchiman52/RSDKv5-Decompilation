@@ -102,6 +102,12 @@ endif()
 # ON). The MiSTer render backend does NOT use SDL — it writes to the native
 # FPGA framebuffer directly in Phase 2. Dynamic link for the sysroot reason
 # above.
+#
+# TODO(phase-2): linker emits "ignoring duplicate libraries" for SDL2/ogg/
+# theora because the parent dependencies/RSDKv5/CMakeLists.txt also adds them
+# unconditionally. Cosmetic warning — inherited, not new damage. Clean up by
+# gating the parent's generic SDL2/ogg/theora target_link_libraries on
+# `NOT PORT_MISTER`, so only this file's pkg-config-derived link is kept.
 pkg_check_modules(SDL2 sdl2 REQUIRED)
 target_link_libraries(RetroEngine ${SDL2_LIBRARIES})
 target_link_directories(RetroEngine PRIVATE ${SDL2_LIBRARY_DIRS})

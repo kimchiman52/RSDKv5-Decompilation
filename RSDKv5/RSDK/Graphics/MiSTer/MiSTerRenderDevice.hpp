@@ -18,14 +18,22 @@ public:
     // (refresh_rate / width / height) are dereferenced unconditionally by
     // Drawing.cpp lines 313-347 via `displayInfo.displays[d].<field>`, so they
     // must be present with those exact names.
+    //
+    // NB: the SDL2 backend carries a leading `uint32 _pad` on its DisplayEntry
+    // because its `displays` pointer is a union aliased to `SDL_DisplayMode`,
+    // whose first field is `Uint32 format`. MiSTer has no such union — the pad
+    // is intentionally omitted.
     struct WindowInfo {
         struct DisplayEntry {
-            uint32 _pad;
             int32 width;
             int32 height;
             int32 refresh_rate;
         } *displays;
         // viewport: kept for API parity with SDL2 backend; unused in Phase 1.
+        // TODO(phase-2): finalize viewport field names when NativeVideoWriter
+        // arrives. Current lowercase {x,y,w,h} is a placeholder — DX9 uses
+        // D3D9VIEWPORT conventions, SDL2 uses SDL_Rect. Pick whichever is
+        // ergonomic for the native framebuffer path.
         struct {
             int32 x, y, w, h;
         } viewport;
@@ -42,9 +50,9 @@ public:
 
     static void SetupImageTexture(int32 width, int32 height, uint8 *imagePixels);
     // 8-argument YUV signatures mirror SDL2RenderDevice.hpp + the call sites
-    // in Video.cpp (lines 241-258). The 3-argument forms declared on
-    // RenderDeviceBase (Drawing.hpp:201-203) are shadowed; follow SDL2's
-    // override here.
+    // in Video.cpp (lines 241-258). These name-hide the 3-argument base forms
+    // declared on RenderDeviceBase (Drawing.hpp:201-203) — they overload with
+    // extra parameters in the derived scope. Same pattern as SDL2's override.
     static void SetupVideoTexture_YUV420(int32 width, int32 height, uint8 *yPlane, uint8 *uPlane, uint8 *vPlane, int32 strideY, int32 strideU,
                                          int32 strideV);
     static void SetupVideoTexture_YUV422(int32 width, int32 height, uint8 *yPlane, uint8 *uPlane, uint8 *vPlane, int32 strideY, int32 strideU,
