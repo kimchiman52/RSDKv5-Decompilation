@@ -119,15 +119,21 @@ if(USE_SDL_AUDIO)
 endif()
 
 # --- MiSTer backend source surface ----------------------------------------
-# The MiSTer render device .cpp is textually #include'd by Drawing.cpp (see
-# Drawing.cpp:132-146 after our Phase 1 patch). We do NOT add the .cpp to
-# RETRO_FILES or target_sources as a compiled unit — doing so produces
-# duplicate-symbol errors for every RenderDevice:: method.
+# MiSTerRenderDevice.cpp is textually #include'd by Drawing.cpp (see
+# Drawing.cpp:132-146 after our Phase 1 patch) — do NOT add the .cpp to
+# target_sources (would cause duplicate-symbol errors for every
+# RenderDevice:: method).
 #
-# We do list the .hpp so IDEs pick it up when browsing the target. No effect
-# on the build.
+# NativeVideoWriter.c IS a normal compile unit (NOT textually included); add
+# it here so the linker picks it up. Guarded internally with
+# #if defined(__linux__) && defined(PORT_MISTER); Mac-host builds compile
+# the stub branch (all functions are no-ops / return-false).
+#
+# The .hpp / .h headers are listed for IDE surface — no effect on the build.
 target_sources(RetroEngine PRIVATE
     RSDKv5/RSDK/Graphics/MiSTer/MiSTerRenderDevice.hpp
+    RSDKv5/RSDK/Graphics/MiSTer/NativeVideoWriter.h
+    RSDKv5/RSDK/Graphics/MiSTer/NativeVideoWriter.c
 )
 
 # --- MiSTer defines -------------------------------------------------------

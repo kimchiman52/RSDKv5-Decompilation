@@ -26,9 +26,25 @@ unsigned long long RenderDevice::prevTicks  = 0;
 
 bool RenderDevice::Init()
 {
-    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Init()");
+    // Clamp pixWidth to MiSTer native resolution. Decision #1 (phase-2-plan.md).
+    // Must be the FIRST statement so SetupRendering -> InitGraphicsAPI ->
+    // SetScreenSize observe the clamped value. LoadSettingsINI() may have
+    // read a stale 424 from upstream settings.ini; overwrite unconditionally.
+    videoSettings.pixWidth = 320;
+    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Init: pixWidth=%d SCREEN_YSIZE=%d", videoSettings.pixWidth, SCREEN_YSIZE);
+
     if (!SetupRendering())
         return false;
+
+    if (!NativeVideoWriter_Init()) {
+        PrintLog(PRINT_NORMAL,
+                 "MiSTerRenderDevice::Init: NativeVideoWriter_Init FAILED (likely Mac host or /dev/mem inaccessible) - continuing as no-op");
+        // Do NOT return false: the rest of the engine should still come up so
+        // the Mac iteration path still logs and the armhf binary run under a
+        // non-root UID can still exit cleanly with a visible error rather
+        // than a silent crash. Subsequent WriteFrame calls become no-ops via
+        // the ddr_base == NULL check inside the writer.
+    }
     return true;
 }
 
@@ -44,7 +60,13 @@ bool RenderDevice::SetupRendering()
 
 bool RenderDevice::InitGraphicsAPI()
 {
-    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::InitGraphicsAPI() [stub]");
+    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::InitGraphicsAPI()");
+    // Phase 2: establish screen geometry so the software rasterizer knows
+    // valid pitch / clip bounds. Mania is single-screen (screenCount=1) and
+    // RetroEngine sets currentScreen=&screens[0] after Init succeeds.
+    // Without this call, screens[0].size.x stays 0 and the rasterizer
+    // produces no output, silently breaking the devmem2 probe in Step 7.
+    SetScreenSize(0, videoSettings.pixWidth, SCREEN_YSIZE);
     return true;
 }
 
@@ -66,17 +88,40 @@ void RenderDevice::GetDisplays()
 
 void RenderDevice::CopyFrameBuffer()
 {
-    // Quiet — called every frame. Phase 2 will wire this to NativeVideoWriter.
+    // Intentionally empty on MiSTer. The rasterizer's frameBuffer IS the
+    // DDR3 source; there is no intermediate texture to upload (contrast
+    // SDL2RenderDevice.cpp:79-96 which SDL_LockTexture/memcpy/Unlock-uploads
+    // every frame). The actual DDR3 write happens in FlipScreen() — that is
+    // the last hook per frame (see RetroEngine.cpp:313,320) so rasterizer
+    // state is settled by then.
 }
 
 void RenderDevice::FlipScreen()
 {
-    // Quiet — called every frame.
+    // Mania is single-screen; screens[0].frameBuffer holds the freshly-
+    // rasterized RGB565 frame. screens[0].pitch is in UINT16 pixels, so
+    // multiply by sizeof(uint16) for the byte pitch the writer expects.
+    if (screens[0].size.x != NV_FRAME_WIDTH || screens[0].size.y != NV_FRAME_HEIGHT) {
+        // Defensive: the engine might reconfigure mid-run (SetScreenSize
+        // calls from mods / cutscenes). If dims drift from the writer's
+        // contract, skip this frame — the writer would reject it anyway.
+        return;
+    }
+    NativeVideoWriter_WriteFrame(screens[0].frameBuffer,
+                                 NV_FRAME_WIDTH,
+                                 NV_FRAME_HEIGHT,
+                                 screens[0].pitch * (int)sizeof(uint16));
 }
 
 void RenderDevice::Release(bool32 isRefresh)
 {
-    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Release(isRefresh=%d) [stub]", (int)isRefresh);
+    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Release(isRefresh=%d)", (int)isRefresh);
+    if (!isRefresh) {
+        // Full shutdown only on the final teardown; Refresh is used by
+        // the engine for windowed<->fullscreen transitions etc., which
+        // are no-ops for our FPGA-driven scanout. See OQ-4 in phase-2-plan.md.
+        NativeVideoWriter_Shutdown();
+    }
 }
 
 void RenderDevice::RefreshWindow()

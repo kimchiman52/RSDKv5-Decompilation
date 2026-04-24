@@ -142,6 +142,7 @@ const RenderVertex rsdkVertexBuffer[24] =
 #elif RETRO_RENDERDEVICE_EGL
 #include "EGL/EGLRenderDevice.cpp"
 #elif RETRO_RENDERDEVICE_MISTER
+#include "MiSTer/NativeVideoWriter.h"   // Phase 2: writer C API, must precede the .cpp include
 #include "MiSTer/MiSTerRenderDevice.cpp"
 #endif
 
