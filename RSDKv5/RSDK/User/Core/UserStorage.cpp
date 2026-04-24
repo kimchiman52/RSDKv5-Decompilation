@@ -1,5 +1,14 @@
 #include "RSDK/Core/RetroEngine.hpp"
 
+#if defined(RSDK_USE_MISTER)
+// Phase 7 Step 4: MiSTer routes user files to ./saves/ (relative to
+// APP_DIR — the launcher cd's to APP_DIR before exec). We mkdir() the
+// directory at engine init so first-run is well-defined even if the
+// release ZIP's empty saves/ entry was dropped during extraction.
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+
 #if RETRO_REV02
 
 // ====================
@@ -1149,7 +1158,27 @@ bool32 RSDK::SKU::TrySaveUserFile(const char *filename, void *buffer, uint32 siz
 
 void RSDK::SKU::InitUserDirectory()
 {
-#if RETRO_PLATFORM == RETRO_OSX
+#if defined(RSDK_USE_MISTER)
+
+    // MiSTer: route user files (SGame.bin, Replay_*.bin, Settings.ini,
+    // log.txt, gamecontrollerdb.txt) to a dedicated ./saves/ subdirectory
+    // so future release-zip upgrades can replace bin/, lib/, and scripts/
+    // without colliding with save data. The launcher (run-mania.sh) cd's
+    // to APP_DIR (/media/fat/games/sonic-mania/) before exec, so the
+    // relative path resolves predictably.
+    //
+    // This arm MUST come before the RETRO_LINUX arm because MiSTer also
+    // reports RETRO_PLATFORM == RETRO_LINUX; without the explicit
+    // short-circuit MiSTer would fall through to the generic Linux
+    // "./" path and lose the saves/ routing.
+    char buffer[0x100];
+    sprintf_s(buffer, sizeof(buffer), "./saves/");
+    (void)mkdir(buffer, 0755); // ignore EEXIST; if mkdir fails for
+                               // permission/RO reasons the engine logs
+                               // "Nope!" on the first save and continues
+    SKU::SetUserFileCallbacks(buffer, NULL, NULL);
+
+#elif RETRO_PLATFORM == RETRO_OSX
 
     char buffer[0x100];
     sprintf_s(buffer, sizeof(buffer), "%s/RSDKv5/", getResourcesPath());
