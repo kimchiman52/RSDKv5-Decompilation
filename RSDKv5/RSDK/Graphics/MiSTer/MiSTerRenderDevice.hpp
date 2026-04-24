@@ -12,6 +12,8 @@
 
 #include <SDL2/SDL.h>
 
+#include "MiSTerPacer.hpp"
+
 using ShaderEntry = ShaderEntryBase;
 
 class RenderDevice : public RenderDeviceBase
@@ -80,6 +82,33 @@ public:
         return false;
     }
     static inline void SetWindowTitle() { /* no-op: MiSTer has no window chrome */ }
+
+    // Phase 6 — pacer + overlay state. Public so the Phase-6 helper TUs and
+    // ProcessEvent handler can touch them without friend-class gymnastics; the
+    // rest of the engine stays oblivious because Drawing.cpp is the only file
+    // that ever textually includes MiSTerRenderDevice.cpp.
+    //
+    // The struct type is declared in MiSTerPacer.hpp with C linkage so it
+    // stays at global scope regardless of whatever C++ namespace this header
+    // is included from — see the namespace note at the top of MiSTerPacer.hpp
+    // for why that matters.
+    static MiSTerPacerFeedbackState pacerFeedback;
+    static unsigned long long       pacerFrameDeadlineNs;
+    static unsigned long long       pacerTargetFrameTimeNs;
+
+    // FPS overlay
+    static bool     showFPSOverlay;
+    static int32    fpsOverlayMode;      // 0=simple, 1=detailed (telemetry only)
+    static unsigned long long fpsAccumNs;
+    static uint32   fpsSampleCount;
+    static int32    fpsLastValue;
+    static char     fpsLabel[96];
+
+    // Pacer jitter stats (for the F12 dump described in Phase 6 Step 2)
+    static unsigned long long pacerMaxJitterNs;
+    static unsigned long long pacerJitterSumNs;
+    static uint32             pacerLateCount;
+    static uint32             pacerStatsFrames;
 
 private:
     static bool SetupRendering();

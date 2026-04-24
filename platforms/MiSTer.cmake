@@ -134,6 +134,12 @@ target_sources(RetroEngine PRIVATE
     RSDKv5/RSDK/Graphics/MiSTer/MiSTerRenderDevice.hpp
     RSDKv5/RSDK/Graphics/MiSTer/NativeVideoWriter.h
     RSDKv5/RSDK/Graphics/MiSTer/NativeVideoWriter.c
+    # Phase 6: pacer + profiling helpers. Must be a standalone TU (free
+    # functions in RSDK::MiSTer::Pacer / ::Perf) because
+    # MiSTerRenderDevice.cpp is textually #include'd from Drawing.cpp — it
+    # cannot house free functions without ODR collisions.
+    RSDKv5/RSDK/Graphics/MiSTer/MiSTerPacer.hpp
+    RSDKv5/RSDK/Graphics/MiSTer/MiSTerPacer.cpp
 )
 
 # --- MiSTer defines -------------------------------------------------------
@@ -156,6 +162,16 @@ target_compile_definitions(RetroEngine PRIVATE
     # ENABLE_PERF_TELEMETRY: forwarded as a compile define so future perf-
     # gating (Phase 6) can pick it up. Harmless when unused.
     ENABLE_PERF_TELEMETRY=$<BOOL:${ENABLE_PERF_TELEMETRY}>
+)
+
+# Phase 6 — closed-loop pacer lead time. The pacer targets
+# (next_vsync - lead_ns) as the frame deadline so WriteFrame arrives with a
+# small safety margin before the FPGA's next scan-out. 3sx ships 2 ms; knob
+# here so live tuning does not require a recompile-and-patch round trip.
+set(MISTER_PACER_LEAD_TIME_US "2000" CACHE STRING
+    "Lead time (microseconds) for the MiSTer closed-loop frame pacer")
+target_compile_definitions(RetroEngine PRIVATE
+    MISTER_PACER_LEAD_TIME_US=${MISTER_PACER_LEAD_TIME_US}
 )
 
 # --- ARM hardening --------------------------------------------------------

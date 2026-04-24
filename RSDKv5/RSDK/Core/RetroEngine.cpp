@@ -1,5 +1,9 @@
 #include "RSDK/Core/RetroEngine.hpp"
 
+#if defined(RSDK_USE_MISTER)
+#include "RSDK/Graphics/MiSTer/MiSTerPacer.hpp"
+#endif
+
 using namespace RSDK;
 
 #if RETRO_REV0U
@@ -384,6 +388,9 @@ void RSDK::ProcessEngine()
             break;
 
         case ENGINESTATE_REGULAR:
+#if defined(RSDK_USE_MISTER)
+            mister_perf_begin_scope(MISTER_PERF_SCOPE_UPDATE);
+#endif
             ProcessInput();
             ProcessSceneTimer();
             ProcessObjects();
@@ -401,7 +408,14 @@ void RSDK::ProcessEngine()
 #if RETRO_VER_EGS || RETRO_USE_DUMMY_ACHIEVEMENTS
             SKU::ProcessAchievements();
 #endif
+#if defined(RSDK_USE_MISTER)
+            mister_perf_end_scope(MISTER_PERF_SCOPE_UPDATE);
+            mister_perf_begin_scope(MISTER_PERF_SCOPE_RASTER);
+#endif
             ProcessObjectDrawLists();
+#if defined(RSDK_USE_MISTER)
+            mister_perf_end_scope(MISTER_PERF_SCOPE_RASTER);
+#endif
 
             break;
 

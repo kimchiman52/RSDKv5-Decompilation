@@ -24,6 +24,28 @@ unsigned long long RenderDevice::targetFreq = 0;
 unsigned long long RenderDevice::curTicks   = 0;
 unsigned long long RenderDevice::prevTicks  = 0;
 
+// --- Phase 6 pacer / overlay static storage ---
+MiSTerPacerFeedbackState RenderDevice::pacerFeedback          = {};
+unsigned long long       RenderDevice::pacerFrameDeadlineNs   = 0;
+unsigned long long       RenderDevice::pacerTargetFrameTimeNs = 0;
+
+// FPS overlay: default-on in telemetry flavor per feedback-always-telemetry.md
+#if defined(ENABLE_PERF_TELEMETRY) && ENABLE_PERF_TELEMETRY
+bool     RenderDevice::showFPSOverlay = true;
+#else
+bool     RenderDevice::showFPSOverlay = false;
+#endif
+int32              RenderDevice::fpsOverlayMode  = 0;
+unsigned long long RenderDevice::fpsAccumNs      = 0;
+uint32             RenderDevice::fpsSampleCount  = 0;
+int32              RenderDevice::fpsLastValue    = 0;
+char               RenderDevice::fpsLabel[96]    = "--";
+
+unsigned long long RenderDevice::pacerMaxJitterNs = 0;
+unsigned long long RenderDevice::pacerJitterSumNs = 0;
+uint32             RenderDevice::pacerLateCount   = 0;
+uint32             RenderDevice::pacerStatsFrames = 0;
+
 bool RenderDevice::Init()
 {
     // Clamp pixWidth to MiSTer native resolution. Decision #1 (phase-2-plan.md).
@@ -115,6 +137,46 @@ void RenderDevice::CopyFrameBuffer()
     // state is settled by then.
 }
 
+// Phase 6 — rolling FPS accumulator. Refreshes the overlay label once per
+// second so the text is readable. Called from FlipScreen only when the
+// overlay is on.
+static void MiSTer_UpdateFPSOverlay(unsigned long long frame_ns,
+                                    const MiSTerPacerFeedbackState &fs)
+{
+    RenderDevice::fpsAccumNs += frame_ns;
+    RenderDevice::fpsSampleCount++;
+
+    if (RenderDevice::fpsAccumNs >= 1000000000ULL) {
+        double avg_ns = (double)RenderDevice::fpsAccumNs
+                        / (double)RenderDevice::fpsSampleCount;
+        if (avg_ns < 1.0) avg_ns = 1.0;
+        RenderDevice::fpsLastValue = (int32)(1e9 / avg_ns + 0.5);
+
+#if defined(ENABLE_PERF_TELEMETRY) && ENABLE_PERF_TELEMETRY
+        if (RenderDevice::fpsOverlayMode == 1) {
+            const char *prefix = fs.vsync_feedback_valid ? "CL" : "OL";
+            long long phase_us = (long long)(fs.pacer_phase_error_ns / 1000);
+            double u_ms = mister_perf_avg_scope_ms(MISTER_PERF_SCOPE_UPDATE);
+            double r_ms = mister_perf_avg_scope_ms(MISTER_PERF_SCOPE_RASTER);
+            double p_ms = mister_perf_avg_scope_ms(MISTER_PERF_SCOPE_PRESENT);
+            SDL_snprintf(RenderDevice::fpsLabel, sizeof(RenderDevice::fpsLabel),
+                         "%d u:%4.1f r:%4.1f p:%4.1f %s:e%+05lld",
+                         RenderDevice::fpsLastValue,
+                         u_ms, r_ms, p_ms,
+                         prefix, phase_us);
+        } else
+#else
+        (void)fs;
+#endif
+        {
+            SDL_snprintf(RenderDevice::fpsLabel, sizeof(RenderDevice::fpsLabel),
+                         "%d", RenderDevice::fpsLastValue);
+        }
+        RenderDevice::fpsAccumNs     = 0;
+        RenderDevice::fpsSampleCount = 0;
+    }
+}
+
 void RenderDevice::FlipScreen()
 {
     // Mania is single-screen; screens[0].frameBuffer holds the freshly-
@@ -126,10 +188,32 @@ void RenderDevice::FlipScreen()
         // contract, skip this frame — the writer would reject it anyway.
         return;
     }
+
+    // SCOPE_PRESENT wraps the DDR3 memcpy + ctrl flip.
+    mister_perf_begin_scope(MISTER_PERF_SCOPE_PRESENT);
+
+    // --- Phase 6: FPS overlay (on-canvas, before WriteFrame) ---
+    unsigned long long now = mister_pacer_now_ns();
+    static unsigned long long prevFrameNs = 0;
+    if (prevFrameNs != 0 && showFPSOverlay) {
+        MiSTer_UpdateFPSOverlay(now - prevFrameNs, pacerFeedback);
+    }
+    prevFrameNs = now;
+
+    if (showFPSOverlay && currentScreen == &screens[0]) {
+        // DrawDevString writes into currentScreen->frameBuffer (RGB565) and
+        // clips against currentScreen->size. Overlay lives at (2,2) top-left
+        // in green — avoids Mania's HUD which is top-center and top-right.
+        DrawDevString(fpsLabel, 2, 2, ALIGN_LEFT, 0x00FF00);
+    }
+
     NativeVideoWriter_WriteFrame(screens[0].frameBuffer,
                                  NV_FRAME_WIDTH,
                                  NV_FRAME_HEIGHT,
                                  screens[0].pitch * (int)sizeof(uint16));
+
+    mister_perf_end_scope(MISTER_PERF_SCOPE_PRESENT);
+    mister_perf_rotate_ring();
 }
 
 void RenderDevice::Release(bool32 isRefresh)
@@ -426,8 +510,14 @@ void RenderDevice::ProcessEvent(SDL_Event event)
 #endif
 
                 case SDL_SCANCODE_F3:
-                    if (userShaderCount)
-                        videoSettings.shaderID = (videoSettings.shaderID + 1) % userShaderCount;
+                    // MiSTer: upstream cycles user shaders, but InitShaders()
+                    // sets shaderSupport=false and userShaderCount stays 0.
+                    // Rebind F3 to toggle the Phase-6 FPS overlay (always on
+                    // in telemetry flavor by default).
+                    showFPSOverlay = !showFPSOverlay;
+                    PrintLog(PRINT_NORMAL,
+                             "MiSTerRenderDevice: FPS overlay %s",
+                             showFPSOverlay ? "on" : "off");
                     break;
 
 #if !RETRO_USE_ORIGINAL_CODE
@@ -458,8 +548,13 @@ void RenderDevice::ProcessEvent(SDL_Event event)
                     break;
 
                 case SDL_SCANCODE_F6:
-                    if (engine.devMenu && videoSettings.screenCount > 1)
-                        videoSettings.screenCount--;
+                    // MiSTer: upstream decrements screenCount when devMenu &&
+                    // screenCount>1; Mania runs screenCount==1 so that path
+                    // is inert. Rebind F6 to cycle the FPS overlay mode.
+                    fpsOverlayMode = (fpsOverlayMode + 1) % 2;
+                    PrintLog(PRINT_NORMAL,
+                             "MiSTerRenderDevice: FPS overlay mode=%d",
+                             (int)fpsOverlayMode);
                     break;
 
                 case SDL_SCANCODE_F7:
@@ -495,6 +590,28 @@ void RenderDevice::ProcessEvent(SDL_Event event)
 
                 case SDL_SCANCODE_F12:
                 case SDL_SCANCODE_PAUSE:
+                    // Phase 6 Step 2: log pacer jitter stats on every press.
+                    // Always-on (no devMenu gate) so dev testers can sample
+                    // the ring buffer without opening the dev menu — which
+                    // itself perturbs pacer cadence.
+                    if (pacerStatsFrames > 0) {
+                        unsigned long long avg_jitter_ns =
+                            pacerJitterSumNs / pacerStatsFrames;
+                        PrintLog(PRINT_NORMAL,
+                                 "MiSTerPacer jitter over %u frames: "
+                                 "max=%lluus avg=%lluus late(>500us)=%u phase_err=%lldus %s",
+                                 (unsigned)pacerStatsFrames,
+                                 (unsigned long long)(pacerMaxJitterNs / 1000ULL),
+                                 (unsigned long long)(avg_jitter_ns / 1000ULL),
+                                 (unsigned)pacerLateCount,
+                                 (long long)(pacerFeedback.pacer_phase_error_ns / 1000),
+                                 pacerFeedback.vsync_feedback_valid ? "CL" : "OL");
+                        // Reset so the next F12 window is a fresh sample.
+                        pacerMaxJitterNs = 0;
+                        pacerJitterSumNs = 0;
+                        pacerLateCount   = 0;
+                        pacerStatsFrames = 0;
+                    }
                     if (engine.devMenu) {
 #if RETRO_REV0U
                         switch (engine.version) {
@@ -564,17 +681,94 @@ bool RenderDevice::ProcessEvents()
 
 void RenderDevice::InitFPSCap()
 {
-    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::InitFPSCap() [stub]");
+    // Phase 6 — pacer scaffold. target_frame_time_ns = 1s / refreshRate.
+    int32 rr = videoSettings.refreshRate > 0 ? videoSettings.refreshRate : 60;
+    pacerTargetFrameTimeNs = (unsigned long long)(1000000000.0 / (double)rr);
+    pacerFrameDeadlineNs   = 0;
+    pacerFeedback          = {};
+
+    // Reset pacer jitter stats so the ring starts clean on every init.
+    pacerMaxJitterNs = 0;
+    pacerJitterSumNs = 0;
+    pacerLateCount   = 0;
+    pacerStatsFrames = 0;
+
+    PrintLog(PRINT_NORMAL,
+             "MiSTerRenderDevice::InitFPSCap: target=%lluns (%d Hz)",
+             (unsigned long long)pacerTargetFrameTimeNs, (int)rr);
 }
 
 bool RenderDevice::CheckFPSCap()
 {
+    // MiSTer: always proceed; the closed-loop pacer in UpdateFPSCap owns
+    // the sleep. Returning false here would put us in a spin around
+    // ProcessEvents that wastes ARM cycles.
     return true;
 }
 
 void RenderDevice::UpdateFPSCap()
 {
-    // no-op — vsync is free on MiSTer via the FPGA scan-out.
+    mister_pacer_poll_feedback(&pacerFeedback);
+
+    unsigned long long now_ns = mister_pacer_now_ns();
+
+    // Staleness disengagement (100 ms without new seq ⇒ open-loop).
+    if (pacerFeedback.vsync_feedback_valid &&
+        pacerFeedback.last_feedback_update_ns > 0 &&
+        (now_ns - pacerFeedback.last_feedback_update_ns) > 100000000ULL) {
+        pacerFeedback.vsync_feedback_valid = false;
+        PrintLog(PRINT_NORMAL,
+                 "MiSTerRenderDevice: vsync feedback stale, falling back to open-loop");
+    }
+
+    if (pacerFrameDeadlineNs == 0) {
+        pacerFrameDeadlineNs = now_ns + pacerTargetFrameTimeNs;
+    }
+
+    // Closed-loop phase correction (ported from 3sx sdl_app.c:10679-10710).
+    const unsigned long long lead_ns =
+        (unsigned long long)MISTER_PACER_LEAD_TIME_US * 1000ULL;
+
+    if (pacerFeedback.vsync_feedback_valid &&
+        now_ns >= pacerFeedback.last_vsync_monotonic_ns) {
+        unsigned long long elapsed = now_ns - pacerFeedback.last_vsync_monotonic_ns;
+        unsigned long long frames_since = elapsed / pacerTargetFrameTimeNs;
+        unsigned long long next_vsync   = pacerFeedback.last_vsync_monotonic_ns
+                                       + (frames_since + 1) * pacerTargetFrameTimeNs;
+        unsigned long long ideal = (next_vsync > lead_ns) ? (next_vsync - lead_ns) : 0;
+        if (ideal <= now_ns) ideal += pacerTargetFrameTimeNs;
+
+        int64 error = (int64)((long long)ideal - (long long)pacerFrameDeadlineNs);
+        pacerFeedback.pacer_phase_error_ns = error;
+        if (error >  (int64)pacerTargetFrameTimeNs ||
+            error < -(int64)pacerTargetFrameTimeNs) {
+            pacerFrameDeadlineNs = ideal;        // snap
+        } else {
+            pacerFrameDeadlineNs = (unsigned long long)
+                ((long long)pacerFrameDeadlineNs + error / 4);   // 25% blend
+        }
+    } else {
+        pacerFeedback.pacer_phase_error_ns = 0;
+    }
+
+    // Sleep until deadline.
+    if (now_ns < pacerFrameDeadlineNs) {
+        mister_pacer_sleep_until_ns(pacerFrameDeadlineNs);
+        now_ns = mister_pacer_now_ns();
+    }
+
+    // Jitter stats — measured against post-blend deadline.
+    unsigned long long jitter_ns = (now_ns > pacerFrameDeadlineNs)
+                                   ? (now_ns - pacerFrameDeadlineNs) : 0;
+    pacerStatsFrames++;
+    if (jitter_ns > pacerMaxJitterNs) pacerMaxJitterNs = jitter_ns;
+    pacerJitterSumNs += jitter_ns;
+    if (jitter_ns > 500000ULL) pacerLateCount++;
+
+    // Advance deadline; guard against >1 frame behind.
+    pacerFrameDeadlineNs += pacerTargetFrameTimeNs;
+    if (now_ns > pacerFrameDeadlineNs + pacerTargetFrameTimeNs)
+        pacerFrameDeadlineNs = now_ns + pacerTargetFrameTimeNs;
 }
 
 bool RenderDevice::InitShaders()
