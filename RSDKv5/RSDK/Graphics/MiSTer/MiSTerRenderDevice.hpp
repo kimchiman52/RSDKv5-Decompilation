@@ -1,13 +1,16 @@
 #ifndef MISTER_RENDERDEVICE_H
 #define MISTER_RENDERDEVICE_H
 
-// MiSTer render device — Phase 1 skeleton.
+// MiSTer render device — Phase 1 skeleton, Phase 3 audio/input wiring.
 //
 // Mirrors SDL2RenderDevice.hpp's public surface so Drawing.hpp's backend
 // dispatch (lines 245-257) can include this header without any ABI change.
-// Deliberately free of SDL / GLFW / Vulkan types — this backend talks to a
-// native video writer that mmaps the MiSTer HPS->FPGA framebuffer directly.
-// Pixel output lands in Phase 2; Phase 1 stubs log-and-return.
+// Includes <SDL2/SDL.h> for SDL_Event in ProcessEvent; no SDL types appear
+// in the render-path interface (still talks to a native video writer that
+// mmaps the MiSTer HPS->FPGA framebuffer directly). Pixel output landed in
+// Phase 2; Phase 3 wires up SDL2 audio + input via the shared backend.
+
+#include <SDL2/SDL.h>
 
 using ShaderEntry = ShaderEntryBase;
 
@@ -61,6 +64,7 @@ public:
                                          int32 strideV);
 
     static bool ProcessEvents();
+    static void ProcessEvent(SDL_Event event);
 
     static void InitFPSCap();
     static bool CheckFPSCap();

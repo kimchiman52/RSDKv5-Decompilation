@@ -10,7 +10,11 @@ int32 RSDK::SKU::buttonDownCount     = 0;
 int32 RSDK::SKU::prevButtonDownCount = 0;
 #endif
 
-#if RETRO_RENDERDEVICE_SDL2
+// PHASE-3(MiSTer): widen to RETRO_RENDERDEVICE_SDL2 || RETRO_INPUTDEVICE_SDL2
+// so the MiSTer backend (renderer=MiSTer, input=SDL2) also pulls in
+// SDLToWinAPIMappings + winAPIToSDLMappings. Safe for every other backend:
+// SDL2-renderer configs always have SDL2 input enabled too.
+#if RETRO_RENDERDEVICE_SDL2 || RETRO_INPUTDEVICE_SDL2
 int32 winAPIToSDLMappings(int32 mapping)
 {
     switch (mapping) {
@@ -807,7 +811,15 @@ void RSDK::SKU::InitKeyboardInputAPI()
 
 void RSDK::SKU::UpdateKeyState(int32 keyCode)
 {
-#if RETRO_RENDERDEVICE_SDL2
+// PHASE-3(MiSTer): key events arrive as SDL scancodes regardless of which
+// RenderDevice delivered them. The historical gate on RETRO_RENDERDEVICE_SDL2
+// was wrong — it should have been RETRO_INPUTDEVICE_SDL2 (the SDL2 input
+// device is what emits SDL scancodes; the renderer is incidental). For
+// MiSTer (RETRO_RENDERDEVICE_MISTER=1, RETRO_INPUTDEVICE_SDL2=1, no GLFW), we
+// widen the predicate to also accept RETRO_INPUTDEVICE_SDL2. This is safe
+// for every other backend: all existing consumers of SDLToWinAPIMappings
+// also have RETRO_INPUTDEVICE_SDL2=1 in parallel.
+#if RETRO_RENDERDEVICE_SDL2 || RETRO_INPUTDEVICE_SDL2
     keyCode = SDLToWinAPIMappings(keyCode);
 #elif RETRO_INPUTDEVICE_GLFW
     keyCode = GLFWToWinAPIMappings(keyCode);
@@ -840,7 +852,8 @@ void RSDK::SKU::UpdateKeyState(int32 keyCode)
 
 void RSDK::SKU::ClearKeyState(int32 keyCode)
 {
-#if RETRO_RENDERDEVICE_SDL2
+// PHASE-3(MiSTer): see UpdateKeyState above for rationale. Same fix.
+#if RETRO_RENDERDEVICE_SDL2 || RETRO_INPUTDEVICE_SDL2
     keyCode = SDLToWinAPIMappings(keyCode);
 #elif RETRO_INPUTDEVICE_GLFW
     keyCode = GLFWToWinAPIMappings(keyCode);

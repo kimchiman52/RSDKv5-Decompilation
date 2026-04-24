@@ -45,6 +45,25 @@ bool RenderDevice::Init()
         // than a silent crash. Subsequent WriteFrame calls become no-ops via
         // the ddr_base == NULL check inside the writer.
     }
+
+    // Phase 3: match upstream pattern (SDL2RenderDevice.cpp:72-75,
+    // DX9RenderDevice.cpp:114-117, EGLRenderDevice.cpp:143-145). Every other
+    // backend initializes audio + input from inside Init(); the parent
+    // RunRetroEngine() flow assumes they're up by the time Init() returns.
+    //
+    // NOTE: SDL2AudioDevice's AudioDevice::Init() (SDL2AudioDevice.cpp:7-33)
+    // ALWAYS returns true — on SDL_OpenAudioDevice failure it only logs and
+    // sets audioState=false internally. Upstream's `if (!AudioDevice::Init())
+    // return false;` branch therefore never fires with the SDL2 audio backend.
+    // We match SDL2RenderDevice's call pattern by discarding the return value
+    // explicitly; failure detection comes from SDL2AudioDevice's own
+    // "ERROR: Unable to open audio device!" log line, not the Init return.
+    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Init: calling AudioDevice::Init()");
+    (void)AudioDevice::Init();
+
+    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Init: calling InitInputDevices()");
+    InitInputDevices();
+
     return true;
 }
 
@@ -116,6 +135,13 @@ void RenderDevice::FlipScreen()
 void RenderDevice::Release(bool32 isRefresh)
 {
     PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Release(isRefresh=%d)", (int)isRefresh);
+
+    // Intentional: do NOT call AudioDevice::Release() or ReleaseInputDevices()
+    // here. The engine main loop (RetroEngine.cpp:326-328) already calls them
+    // in order *before* invoking RenderDevice::Release(false). No upstream
+    // backend (SDL2/DX9/DX11/EGL/Vulkan) redoes that work from inside their
+    // Release; adding it would cause double-release / double-free.
+
     if (!isRefresh) {
         // Full shutdown only on the final teardown; Refresh is used by
         // the engine for windowed<->fullscreen transitions etc., which
@@ -188,9 +214,351 @@ void RenderDevice::SetupVideoTexture_YUV444(int32 width, int32 height, uint8 *yP
     PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::SetupVideoTexture_YUV444() [stub]");
 }
 
+// Phase 3: lifted-and-shifted from SDL2RenderDevice.cpp:694-1035 with
+// window-specific branches stripped:
+//   - Entire window-event case (MiSTer has no SDL window; SDL_QUIT still
+//     handles window-close via X11/wayland mapping on desktop, a no-op on
+//     MiSTer).
+//   - Alt+Enter fullscreen toggle inside SDL_SCANCODE_RETURN (no window to
+//     toggle; the outer case label stays so RETURN falls through to the
+//     default keyboard-state-update path).
+// Everything else — controller add/remove, keyboard up/down with devmenu
+// hotkeys, mouse/touch, SDL_APP_*, SDL_QUIT — is preserved verbatim.
+void RenderDevice::ProcessEvent(SDL_Event event)
+{
+// ENABLE_PERF_TELEMETRY is ALWAYS defined (to 0 or 1) in MiSTer builds via
+// platforms/MiSTer.cmake:158's $<BOOL:…> genexpr — must use `#if`, not
+// `#ifdef`. For non-MiSTer builds the macro may be undefined; use the
+// defined() && value form so the log line compiles out harmlessly.
+#if defined(ENABLE_PERF_TELEMETRY) && ENABLE_PERF_TELEMETRY
+    if (event.type == SDL_CONTROLLERDEVICEADDED || event.type == SDL_CONTROLLERDEVICEREMOVED
+        || event.type == SDL_KEYDOWN || event.type == SDL_KEYUP || event.type == SDL_QUIT) {
+        PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::ProcessEvent(type=0x%x)", (unsigned)event.type);
+    }
+#endif
+
+    switch (event.type) {
+        case SDL_CONTROLLERDEVICEADDED: {
+            SDL_GameController *game_controller = SDL_GameControllerOpen(event.cdevice.which);
+
+            if (game_controller != NULL) {
+                uint32 id;
+                char idBuffer[0x20];
+                sprintf_s(idBuffer, sizeof(idBuffer), "SDLDevice%d", SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(game_controller)));
+                GenerateHashCRC(&id, idBuffer);
+
+                if (SKU::InitSDL2InputDevice(id, game_controller) == NULL)
+                    SDL_GameControllerClose(game_controller);
+            }
+
+            break;
+        }
+
+        case SDL_CONTROLLERDEVICEREMOVED: {
+            uint32 id;
+            char idBuffer[0x20];
+            sprintf_s(idBuffer, sizeof(idBuffer), "SDLDevice%d", event.cdevice.which);
+            GenerateHashCRC(&id, idBuffer);
+
+            RemoveInputDevice(InputDeviceFromID(id));
+            break;
+        }
+
+        case SDL_APP_WILLENTERFOREGROUND:
+#if RETRO_REV02
+            SKU::userCore->focusState = 0;
+#endif
+            break;
+
+        case SDL_APP_WILLENTERBACKGROUND:
+#if RETRO_REV02
+            SKU::userCore->focusState = 1;
+#endif
+            break;
+
+        case SDL_APP_TERMINATING: isRunning = false; break;
+
+        case SDL_MOUSEBUTTONDOWN:
+            switch (event.button.button) {
+                case SDL_BUTTON_LEFT: touchInfo.down[0] = true; touchInfo.count = 1;
+#if !RETRO_REV02
+                    RSDK::SKU::buttonDownCount++;
+#endif
+                    break;
+
+                case SDL_BUTTON_RIGHT:
+#if !RETRO_REV02 && RETRO_INPUTDEVICE_KEYBOARD
+                    RSDK::SKU::specialKeyStates[3] = true;
+                    RSDK::SKU::buttonDownCount++;
+#endif
+                    break;
+            }
+            break;
+
+        case SDL_MOUSEBUTTONUP:
+            switch (event.button.button) {
+                case SDL_BUTTON_LEFT: touchInfo.down[0] = false; touchInfo.count = 0;
+#if !RETRO_REV02
+                    RSDK::SKU::buttonDownCount--;
+#endif
+                    break;
+
+                case SDL_BUTTON_RIGHT:
+#if !RETRO_REV02 && RETRO_INPUTDEVICE_KEYBOARD
+                    RSDK::SKU::specialKeyStates[3] = false;
+                    RSDK::SKU::buttonDownCount--;
+#endif
+                    break;
+            }
+            break;
+
+        case SDL_FINGERMOTION:
+        case SDL_FINGERDOWN:
+        case SDL_FINGERUP: {
+            int32 count     = SDL_GetNumTouchFingers(event.tfinger.touchId);
+            touchInfo.count = 0;
+            for (int32 i = 0; i < count; i++) {
+                SDL_Finger *finger = SDL_GetTouchFinger(event.tfinger.touchId, i);
+                if (finger) {
+                    touchInfo.down[touchInfo.count] = true;
+                    touchInfo.x[touchInfo.count]    = finger->x;
+                    touchInfo.y[touchInfo.count]    = finger->y;
+                    touchInfo.count++;
+                }
+            }
+            break;
+        }
+
+        case SDL_KEYDOWN:
+#if !RETRO_REV02
+            ++RSDK::SKU::buttonDownCount;
+#endif
+            switch (event.key.keysym.scancode) {
+                case SDL_SCANCODE_RETURN:
+                    // PHASE-3(MiSTer): Alt+Enter fullscreen toggle removed —
+                    // MiSTer has no SDL_Window to flip. RETURN falls through
+                    // to the default SKU::UpdateKeyState path below.
+#if !RETRO_REV02 && RETRO_INPUTDEVICE_KEYBOARD
+                    RSDK::SKU::specialKeyStates[1] = true;
+#endif
+                    // [fallthrough]
+
+                default:
+#if RETRO_INPUTDEVICE_KEYBOARD
+                    SKU::UpdateKeyState(event.key.keysym.scancode);
+#endif
+                    break;
+
+                case SDL_SCANCODE_ESCAPE:
+                    if (engine.devMenu) {
+#if RETRO_REV0U
+                        if (sceneInfo.state == ENGINESTATE_DEVMENU || RSDK::Legacy::gameMode == RSDK::Legacy::ENGINE_DEVMENU)
+#else
+                        if (sceneInfo.state == ENGINESTATE_DEVMENU)
+#endif
+                            CloseDevMenu();
+                        else
+                            OpenDevMenu();
+                    }
+                    else {
+#if RETRO_INPUTDEVICE_KEYBOARD
+                        SKU::UpdateKeyState(event.key.keysym.scancode);
+#endif
+                    }
+
+#if !RETRO_REV02 && RETRO_INPUTDEVICE_KEYBOARD
+                    RSDK::SKU::specialKeyStates[0] = true;
+#endif
+                    break;
+
+#if !RETRO_USE_ORIGINAL_CODE
+                case SDL_SCANCODE_F1:
+                    if (engine.devMenu) {
+                        sceneInfo.listPos--;
+                        while (sceneInfo.listPos < sceneInfo.listCategory[sceneInfo.activeCategory].sceneOffsetStart
+                            || sceneInfo.listPos > sceneInfo.listCategory[sceneInfo.activeCategory].sceneOffsetEnd
+                            || !sceneInfo.listCategory[sceneInfo.activeCategory].sceneCount) {
+                            sceneInfo.activeCategory--;
+                            if (sceneInfo.activeCategory >= sceneInfo.categoryCount) {
+                                sceneInfo.activeCategory = sceneInfo.categoryCount - 1;
+                            }
+                            sceneInfo.listPos = sceneInfo.listCategory[sceneInfo.activeCategory].sceneOffsetEnd - 1;
+                        }
+
+#if RETRO_REV0U
+                        switch (engine.version) {
+                            default: break;
+                            case 5: LoadScene(); break;
+                            case 4:
+                            case 3: RSDK::Legacy::stageMode = RSDK::Legacy::STAGEMODE_LOAD; break;
+                        }
+#else
+                        LoadScene();
+#endif
+                    }
+                    break;
+
+                case SDL_SCANCODE_F2:
+                    if (engine.devMenu) {
+                        sceneInfo.listPos++;
+                        while (sceneInfo.listPos < sceneInfo.listCategory[sceneInfo.activeCategory].sceneOffsetStart
+                            || sceneInfo.listPos > sceneInfo.listCategory[sceneInfo.activeCategory].sceneOffsetEnd
+                            || !sceneInfo.listCategory[sceneInfo.activeCategory].sceneCount) {
+                            sceneInfo.activeCategory++;
+                            if (sceneInfo.activeCategory >= sceneInfo.categoryCount) {
+                                sceneInfo.activeCategory = 0;
+                            }
+                            sceneInfo.listPos = sceneInfo.listCategory[sceneInfo.activeCategory].sceneOffsetStart;
+                        }
+
+#if RETRO_REV0U
+                        switch (engine.version) {
+                            default: break;
+                            case 5: LoadScene(); break;
+                            case 4:
+                            case 3: RSDK::Legacy::stageMode = RSDK::Legacy::STAGEMODE_LOAD; break;
+                        }
+#else
+                        LoadScene();
+#endif
+                    }
+                    break;
+#endif
+
+                case SDL_SCANCODE_F3:
+                    if (userShaderCount)
+                        videoSettings.shaderID = (videoSettings.shaderID + 1) % userShaderCount;
+                    break;
+
+#if !RETRO_USE_ORIGINAL_CODE
+                case SDL_SCANCODE_F4:
+                    if (engine.devMenu)
+                        engine.showEntityInfo ^= 1;
+                    break;
+
+                case SDL_SCANCODE_F5:
+                    if (engine.devMenu) {
+                        // Quick-Reload
+#if RETRO_USE_MOD_LOADER
+                        if (event.key.keysym.mod & KMOD_LCTRL)
+                            RefreshModFolders();
+#endif
+
+#if RETRO_REV0U
+                        switch (engine.version) {
+                            default: break;
+                            case 5: LoadScene(); break;
+                            case 4:
+                            case 3: RSDK::Legacy::stageMode = RSDK::Legacy::STAGEMODE_LOAD; break;
+                        }
+#else
+                        LoadScene();
+#endif
+                    }
+                    break;
+
+                case SDL_SCANCODE_F6:
+                    if (engine.devMenu && videoSettings.screenCount > 1)
+                        videoSettings.screenCount--;
+                    break;
+
+                case SDL_SCANCODE_F7:
+                    if (engine.devMenu && videoSettings.screenCount < SCREEN_COUNT)
+                        videoSettings.screenCount++;
+                    break;
+
+                case SDL_SCANCODE_F8:
+                    if (engine.devMenu)
+                        engine.showUpdateRanges ^= 1;
+                    break;
+
+                case SDL_SCANCODE_F9:
+                    if (engine.devMenu)
+                        showHitboxes ^= 1;
+                    break;
+
+                case SDL_SCANCODE_F10:
+                    if (engine.devMenu)
+                        engine.showPaletteOverlay ^= 1;
+                    break;
+#endif
+                case SDL_SCANCODE_BACKSPACE:
+                    if (engine.devMenu)
+                        engine.gameSpeed = engine.fastForwardSpeed;
+                    break;
+
+                case SDL_SCANCODE_F11:
+                case SDL_SCANCODE_INSERT:
+                    if (engine.devMenu)
+                        engine.frameStep = true;
+                    break;
+
+                case SDL_SCANCODE_F12:
+                case SDL_SCANCODE_PAUSE:
+                    if (engine.devMenu) {
+#if RETRO_REV0U
+                        switch (engine.version) {
+                            default: break;
+                            case 5:
+                                if (sceneInfo.state != ENGINESTATE_NONE)
+                                    sceneInfo.state ^= ENGINESTATE_STEPOVER;
+                                break;
+                            case 4:
+                            case 3:
+                                if (RSDK::Legacy::stageMode != ENGINESTATE_NONE)
+                                    RSDK::Legacy::stageMode ^= RSDK::Legacy::STAGEMODE_STEPOVER;
+                                break;
+                        }
+#else
+                        if (sceneInfo.state != ENGINESTATE_NONE)
+                            sceneInfo.state ^= ENGINESTATE_STEPOVER;
+#endif
+                    }
+                    break;
+            }
+            break;
+
+        case SDL_KEYUP:
+#if !RETRO_REV02
+            --RSDK::SKU::buttonDownCount;
+#endif
+            switch (event.key.keysym.scancode) {
+                default:
+#if RETRO_INPUTDEVICE_KEYBOARD
+                    SKU::ClearKeyState(event.key.keysym.scancode);
+#endif
+                    break;
+
+#if !RETRO_REV02 && RETRO_INPUTDEVICE_KEYBOARD
+                case SDL_SCANCODE_ESCAPE:
+                    RSDK::SKU::specialKeyStates[0] = false;
+                    SKU::ClearKeyState(event.key.keysym.scancode);
+                    break;
+
+                case SDL_SCANCODE_RETURN:
+                    RSDK::SKU::specialKeyStates[1] = false;
+                    SKU::ClearKeyState(event.key.keysym.scancode);
+                    break;
+#endif
+                case SDL_SCANCODE_BACKSPACE: engine.gameSpeed = 1; break;
+            }
+            break;
+
+        case SDL_QUIT: isRunning = false; break;
+    }
+}
+
 bool RenderDevice::ProcessEvents()
 {
-    // Phase 3 will pump SDL2 input events here.
+    SDL_Event sdlEvent;
+
+    while (SDL_PollEvent(&sdlEvent)) {
+        ProcessEvent(sdlEvent);
+
+        if (!isRunning)
+            return false;
+    }
+
     return isRunning;
 }
 
