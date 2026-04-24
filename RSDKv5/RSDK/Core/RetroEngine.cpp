@@ -483,6 +483,9 @@ void RSDK::ProcessEngine()
             break;
 
         case ENGINESTATE_REGULAR | ENGINESTATE_STEPOVER:
+#if defined(RSDK_USE_MISTER)
+            mister_perf_begin_scope(MISTER_PERF_SCOPE_UPDATE);
+#endif
             ProcessInput();
 
             if (engine.frameStep) {
@@ -492,9 +495,24 @@ void RSDK::ProcessEngine()
 #if RETRO_VER_EGS || RETRO_USE_DUMMY_ACHIEVEMENTS
                 SKU::ProcessAchievements();
 #endif
+#if defined(RSDK_USE_MISTER)
+                mister_perf_end_scope(MISTER_PERF_SCOPE_UPDATE);
+                mister_perf_begin_scope(MISTER_PERF_SCOPE_RASTER);
+#endif
                 ProcessObjectDrawLists();
+#if defined(RSDK_USE_MISTER)
+                mister_perf_end_scope(MISTER_PERF_SCOPE_RASTER);
+#endif
                 engine.frameStep = false;
             }
+#if defined(RSDK_USE_MISTER)
+            else {
+                // Stepover frame with no actual step: close UPDATE scope so
+                // the begin/end pair stays balanced. RASTER stays unsampled
+                // this frame (no draw list processed).
+                mister_perf_end_scope(MISTER_PERF_SCOPE_UPDATE);
+            }
+#endif
             break;
 
         case ENGINESTATE_PAUSED | ENGINESTATE_STEPOVER:

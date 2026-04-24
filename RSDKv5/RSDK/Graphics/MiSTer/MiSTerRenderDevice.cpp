@@ -46,6 +46,10 @@ unsigned long long RenderDevice::pacerJitterSumNs = 0;
 uint32             RenderDevice::pacerLateCount   = 0;
 uint32             RenderDevice::pacerStatsFrames = 0;
 
+// File-scope (not function-static) so InitFPSCap can reset it across
+// Release+re-Init / scene reload boundaries. P-2.2 review fix.
+static unsigned long long s_prevFrameNs = 0;
+
 bool RenderDevice::Init()
 {
     // Clamp pixWidth to MiSTer native resolution. Decision #1 (phase-2-plan.md).
@@ -186,6 +190,10 @@ void RenderDevice::FlipScreen()
         // Defensive: the engine might reconfigure mid-run (SetScreenSize
         // calls from mods / cutscenes). If dims drift from the writer's
         // contract, skip this frame — the writer would reject it anyway.
+        // Still update prevFrameNs so the next correctly-sized frame's delta
+        // is bounded by one real frame, not by however long the dim mismatch
+        // persisted. P-2.3 review fix.
+        s_prevFrameNs = mister_pacer_now_ns();
         return;
     }
 
@@ -194,11 +202,10 @@ void RenderDevice::FlipScreen()
 
     // --- Phase 6: FPS overlay (on-canvas, before WriteFrame) ---
     unsigned long long now = mister_pacer_now_ns();
-    static unsigned long long prevFrameNs = 0;
-    if (prevFrameNs != 0 && showFPSOverlay) {
-        MiSTer_UpdateFPSOverlay(now - prevFrameNs, pacerFeedback);
+    if (s_prevFrameNs != 0 && showFPSOverlay) {
+        MiSTer_UpdateFPSOverlay(now - s_prevFrameNs, pacerFeedback);
     }
-    prevFrameNs = now;
+    s_prevFrameNs = now;
 
     if (showFPSOverlay && currentScreen == &screens[0]) {
         // DrawDevString writes into currentScreen->frameBuffer (RGB565) and
@@ -213,7 +220,6 @@ void RenderDevice::FlipScreen()
                                  screens[0].pitch * (int)sizeof(uint16));
 
     mister_perf_end_scope(MISTER_PERF_SCOPE_PRESENT);
-    mister_perf_rotate_ring();
 }
 
 void RenderDevice::Release(bool32 isRefresh)
@@ -551,10 +557,19 @@ void RenderDevice::ProcessEvent(SDL_Event event)
                     // MiSTer: upstream decrements screenCount when devMenu &&
                     // screenCount>1; Mania runs screenCount==1 so that path
                     // is inert. Rebind F6 to cycle the FPS overlay mode.
+                    //
+                    // P-2.6 review fix: in the clean (non-telemetry) flavor
+                    // the detailed mode would print zero-filled u/r/p/phase
+                    // fields because mister_perf_avg_scope_ms is a stub
+                    // returning 0.0 and pacer_phase_error_ns is never set.
+                    // Gate the cycle on telemetry so clean+F6 is a true
+                    // no-op rather than a degenerate UI state.
+#if defined(ENABLE_PERF_TELEMETRY) && ENABLE_PERF_TELEMETRY
                     fpsOverlayMode = (fpsOverlayMode + 1) % 2;
                     PrintLog(PRINT_NORMAL,
                              "MiSTerRenderDevice: FPS overlay mode=%d",
                              (int)fpsOverlayMode);
+#endif
                     break;
 
                 case SDL_SCANCODE_F7:
@@ -594,6 +609,18 @@ void RenderDevice::ProcessEvent(SDL_Event event)
                     // Always-on (no devMenu gate) so dev testers can sample
                     // the ring buffer without opening the dev menu — which
                     // itself perturbs pacer cadence.
+                    //
+                    // P-2.7 review note on jitter semantics: the values
+                    // reported here measure (now - pacerFrameDeadlineNs)
+                    // AFTER the closed-loop 25%-blend correction in
+                    // UpdateFPSCap has already moved the deadline toward
+                    // the FPGA-observed vsync. They are NOT the raw
+                    // wake-up phase relative to true vsync. In the steady
+                    // state with vsync feedback engaged the two converge,
+                    // but during initial lock-on or after a snap the post-
+                    // blend deadline can mask underlying scheduler jitter.
+                    // Use phase_err in the F12 line (raw closed-loop
+                    // error before blend) for the true vsync-phase signal.
                     if (pacerStatsFrames > 0) {
                         unsigned long long avg_jitter_ns =
                             pacerJitterSumNs / pacerStatsFrames;
@@ -693,6 +720,13 @@ void RenderDevice::InitFPSCap()
     pacerLateCount   = 0;
     pacerStatsFrames = 0;
 
+    // P-2.2 review fix: reset the FPS-sample baseline so a Release+re-Init
+    // (or scene reload, which re-runs InitFPSCap path) does not let the
+    // first post-reset frame inherit a multi-second delta.
+    s_prevFrameNs = 0;
+    fpsAccumNs     = 0;
+    fpsSampleCount = 0;
+
     PrintLog(PRINT_NORMAL,
              "MiSTerRenderDevice::InitFPSCap: target=%lluns (%d Hz)",
              (unsigned long long)pacerTargetFrameTimeNs, (int)rr);
@@ -726,7 +760,11 @@ void RenderDevice::UpdateFPSCap()
     }
 
     // Closed-loop phase correction (ported from 3sx sdl_app.c:10679-10710).
-    const unsigned long long lead_ns =
+    // P-3.3 review fix: hoist the μs→ns conversion of the CMake-driven lead
+    // time into a named constant so the unit math is unambiguous at the use
+    // site below. MISTER_PACER_LEAD_TIME_US is set by platforms/MiSTer.cmake
+    // (default 2000 µs).
+    static constexpr unsigned long long kPacerLeadTimeNs =
         (unsigned long long)MISTER_PACER_LEAD_TIME_US * 1000ULL;
 
     if (pacerFeedback.vsync_feedback_valid &&
@@ -735,7 +773,7 @@ void RenderDevice::UpdateFPSCap()
         unsigned long long frames_since = elapsed / pacerTargetFrameTimeNs;
         unsigned long long next_vsync   = pacerFeedback.last_vsync_monotonic_ns
                                        + (frames_since + 1) * pacerTargetFrameTimeNs;
-        unsigned long long ideal = (next_vsync > lead_ns) ? (next_vsync - lead_ns) : 0;
+        unsigned long long ideal = (next_vsync > kPacerLeadTimeNs) ? (next_vsync - kPacerLeadTimeNs) : 0;
         if (ideal <= now_ns) ideal += pacerTargetFrameTimeNs;
 
         int64 error = (int64)((long long)ideal - (long long)pacerFrameDeadlineNs);

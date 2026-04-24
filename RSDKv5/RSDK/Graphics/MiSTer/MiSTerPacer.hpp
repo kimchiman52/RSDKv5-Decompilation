@@ -76,14 +76,12 @@ void       mister_pacer_restore_arm_clock(void);
 void   mister_perf_begin_scope(int scope);
 void   mister_perf_end_scope(int scope);
 double mister_perf_avg_scope_ms(int scope);
-void   mister_perf_rotate_ring(void);
 #else
 // Inline no-ops so they compile out to nothing in the clean flavor without
 // adding a per-call-site #if at every instrumentation point.
 static inline void   mister_perf_begin_scope(int s)  { (void)s; }
 static inline void   mister_perf_end_scope(int s)    { (void)s; }
 static inline double mister_perf_avg_scope_ms(int s) { (void)s; return 0.0; }
-static inline void   mister_perf_rotate_ring(void)   {}
 #endif
 
 #ifdef __cplusplus

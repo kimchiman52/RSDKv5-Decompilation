@@ -134,10 +134,14 @@ target_sources(RetroEngine PRIVATE
     RSDKv5/RSDK/Graphics/MiSTer/MiSTerRenderDevice.hpp
     RSDKv5/RSDK/Graphics/MiSTer/NativeVideoWriter.h
     RSDKv5/RSDK/Graphics/MiSTer/NativeVideoWriter.c
-    # Phase 6: pacer + profiling helpers. Must be a standalone TU (free
-    # functions in RSDK::MiSTer::Pacer / ::Perf) because
-    # MiSTerRenderDevice.cpp is textually #include'd from Drawing.cpp — it
-    # cannot house free functions without ODR collisions.
+    # Phase 6: pacer + profiling helpers. Must be a standalone TU because
+    # MiSTerRenderDevice.cpp is textually #include'd from Drawing.cpp from
+    # *inside* `namespace RSDK { ... }` scope — any C++ namespace blocks in
+    # the helper would nest under ::RSDK::, ODR-splitting the types and
+    # poisoning RSDK:: lookups in the consuming TU. The helpers therefore
+    # use **C linkage with flat names** (`mister_pacer_*`, `mister_perf_*`)
+    # which bind to global scope regardless of the caller's open
+    # namespaces. See the long comment block at the top of MiSTerPacer.hpp.
     RSDKv5/RSDK/Graphics/MiSTer/MiSTerPacer.hpp
     RSDKv5/RSDK/Graphics/MiSTer/MiSTerPacer.cpp
 )

@@ -72,6 +72,20 @@ static const uint64_t kBusyWaitThresholdNs = 200000ULL;  // 200 μs — matches 
 // clock_nanosleep. Trivial on most Linux kernels (SDL_GetPerformanceCounter
 // on POSIX is usually CLOCK_MONOTONIC or CLOCK_MONOTONIC_RAW), but rather
 // than assume, compute a one-shot offset between the two domains.
+//
+// P-2.5 review note: the offset is computed exactly once on first call and
+// cached for the process lifetime. This is safe because, on Linux SDL2
+// builds, both CLOCK_MONOTONIC and CLOCK_MONOTONIC_RAW (whichever
+// SDL_GetPerformanceCounter ultimately wraps) advance at the SAME rate as
+// each other and as the kernel's hrtimer clock — drift between the two
+// reads is bounded by the read latency (sub-microsecond). They are not
+// rate-adjusted at runtime (NTP slewing applies only to CLOCK_REALTIME).
+// If a future SDL2 / kernel combination ever broke this assumption (e.g.
+// SDL switching to CLOCK_BOOTTIME and the kernel suspending mid-run), the
+// pacer would gradually drift relative to the FPGA scan-out and the
+// vsync-feedback closed loop in UpdateFPSCap would have to re-snap each
+// frame — observable as a pacer_phase_error_ns trend in the F12 jitter
+// dump. Re-evaluate this caching if that telemetry ever shows it.
 static int64_t MonoToPacerOffsetNs(void)
 {
     static bool initialized = false;
@@ -294,6 +308,17 @@ ScopeRing g_rings[MISTER_PERF_SCOPE_COUNT] = {};
 extern "C" void mister_perf_begin_scope(int scope)
 {
     if (scope < 0 || scope >= MISTER_PERF_SCOPE_COUNT) return;
+    // P-2.4 review fix: detect unpaired begin/begin (a missing end_scope on
+    // the previous frame would silently fold a multi-frame sample into the
+    // next one). Telemetry-only — never enabled in clean release flow.
+    if (g_rings[scope].start_ns != 0) {
+        fprintf(stderr,
+                "[MiSTerPerf] WARNING: begin_scope(%d) called with start_ns "
+                "already set; previous end_scope missing. Frame sample for "
+                "this scope will be dropped.\n",
+                scope);
+        fflush(stderr);
+    }
     g_rings[scope].start_ns = PerfNowNs();
 }
 
@@ -318,13 +343,6 @@ extern "C" double mister_perf_avg_scope_ms(int scope)
     uint64_t sum = 0;
     for (int i = 0; i < r.filled; ++i) sum += r.samples[i];
     return (double)sum / (double)r.filled / 1e6;
-}
-
-extern "C" void mister_perf_rotate_ring(void)
-{
-    // No-op: EndScope already advances write_idx. Kept for API parity with
-    // the plan; future callers (per-frame synchronization of multi-scope
-    // averages) can hook in here without another call-site sweep.
 }
 
 #endif  // ENABLE_PERF_TELEMETRY
