@@ -2,6 +2,7 @@
 
 #if defined(RSDK_USE_MISTER)
 #include "RSDK/Graphics/MiSTer/MiSTerPacer.hpp"
+#include <stdlib.h>  // Phase 9: getenv() for SONIC_MANIA_MODS
 #endif
 
 using namespace RSDK;
@@ -70,7 +71,22 @@ int32 RSDK::RunRetroEngine(int32 argc, char *argv[])
 
 #if RETRO_REV0U
         engine.version = 0;
+#if defined(RSDK_USE_MISTER)
+        // Phase 9: SONIC_MANIA_MODS=0 from the MiSTer wrapper (status[10]=1)
+        // disables the ModAPI mod scan entirely. Default behavior (env unset
+        // or "1") preserves upstream — InitModAPI(true) runs.
+        {
+            const char *mods_env = ::getenv("SONIC_MANIA_MODS");
+            const bool mods_enabled = !mods_env || (mods_env[0] != '0');
+            if (mods_enabled) {
+                InitModAPI(true); // check for versions
+            } else {
+                PrintLog(PRINT_NORMAL, "Phase 9: SONIC_MANIA_MODS=0 -> skipping InitModAPI");
+            }
+        }
+#else
         InitModAPI(true); // check for versions
+#endif
         engine.version = 5;
 #endif
 #endif

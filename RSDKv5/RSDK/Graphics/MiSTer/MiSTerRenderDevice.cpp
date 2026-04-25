@@ -58,12 +58,58 @@ bool RenderDevice::Init()
     // crashes that gdb masks.
     SigHandler_Init();
 
-    // Clamp pixWidth to MiSTer native resolution. Decision #1 (phase-2-plan.md).
+    // Phase 9: pixWidth is now aspect-keyed off SONIC_MANIA_ASPECT env var
+    // emitted by the wrapper from status[13].
+    //   "169" -> 424 (16:9 widescreen, paired with 8.7069 MHz pixel clock)
+    //   "43" / unset / anything else -> 320 (4:3, NTSC-exact 6.75 MHz pixel)
     // Must be the FIRST statement so SetupRendering -> InitGraphicsAPI ->
-    // SetScreenSize observe the clamped value. LoadSettingsINI() may have
-    // read a stale 424 from upstream settings.ini; overwrite unconditionally.
-    videoSettings.pixWidth = 320;
+    // SetScreenSize observe the new value. LoadSettingsINI() may have read a
+    // stale value from upstream settings.ini; overwrite unconditionally.
+    {
+        const char *aspect_env = getenv("SONIC_MANIA_ASPECT");
+        if (aspect_env && strcmp(aspect_env, "169") == 0) {
+            videoSettings.pixWidth = 424;
+        } else {
+            videoSettings.pixWidth = 320;
+        }
+        PrintLog(PRINT_NORMAL, "Phase 9: SONIC_MANIA_ASPECT=%s -> pixWidth=%d",
+                 aspect_env ? aspect_env : "(unset)", (int)videoSettings.pixWidth);
+    }
     PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Init: pixWidth=%d SCREEN_YSIZE=%d", videoSettings.pixWidth, SCREEN_YSIZE);
+
+    // Phase 9: also propagate the runtime dims to NativeVideoWriter so its
+    // memcpy + DDR3 layout (BUF1_OFFSET, FRAME_BYTES) sizes off the active
+    // aspect rather than the compile-time 320x240 default. MUST happen before
+    // NativeVideoWriter_Init() runs so the mmap covers the correct region.
+    NativeVideoWriter_SetDims((int)videoSettings.pixWidth, (int)SCREEN_YSIZE);
+
+    // Phase 9: SONIC_MANIA_FPS_OVERLAY env var seeds the static overlay state.
+    //   "0" -> off
+    //   "1" -> Simple   (showFPSOverlay=true,  fpsOverlayMode=0)
+    //   "2" -> Detailed (showFPSOverlay=true,  fpsOverlayMode=1)
+    // Must run before any frame logic / pacer reads showFPSOverlay.
+    {
+        const char *fpso = getenv("SONIC_MANIA_FPS_OVERLAY");
+        const int mode = fpso ? atoi(fpso) : 0;
+        switch (mode) {
+            case 1:
+                RenderDevice::showFPSOverlay = true;
+                RenderDevice::fpsOverlayMode = 0;
+                break;
+            case 2:
+                RenderDevice::showFPSOverlay = true;
+                RenderDevice::fpsOverlayMode = 1;
+                break;
+            case 0:
+            default:
+                RenderDevice::showFPSOverlay = false;
+                RenderDevice::fpsOverlayMode = 0;
+                break;
+        }
+        PrintLog(PRINT_NORMAL, "Phase 9: SONIC_MANIA_FPS_OVERLAY=%s -> showFPSOverlay=%d fpsOverlayMode=%d",
+                 fpso ? fpso : "(unset)",
+                 (int)RenderDevice::showFPSOverlay, (int)RenderDevice::fpsOverlayMode);
+    }
 
     if (!SetupRendering())
         return false;
@@ -212,7 +258,9 @@ void RenderDevice::FlipScreen()
     // Mania is single-screen; screens[0].frameBuffer holds the freshly-
     // rasterized RGB565 frame. screens[0].pitch is in UINT16 pixels, so
     // multiply by sizeof(uint16) for the byte pitch the writer expects.
-    if (screens[0].size.x != NV_FRAME_WIDTH || screens[0].size.y != NV_FRAME_HEIGHT) {
+    // Phase 9: dims are runtime-keyed off SONIC_MANIA_ASPECT (see Init()).
+    if (screens[0].size.x != nv_frame_width_runtime ||
+        screens[0].size.y != nv_frame_height_runtime) {
         // Defensive: the engine might reconfigure mid-run (SetScreenSize
         // calls from mods / cutscenes). If dims drift from the writer's
         // contract, skip this frame — the writer would reject it anyway.
@@ -241,8 +289,8 @@ void RenderDevice::FlipScreen()
     }
 
     NativeVideoWriter_WriteFrame(screens[0].frameBuffer,
-                                 NV_FRAME_WIDTH,
-                                 NV_FRAME_HEIGHT,
+                                 nv_frame_width_runtime,
+                                 nv_frame_height_runtime,
                                  screens[0].pitch * (int)sizeof(uint16));
 
     mister_perf_end_scope(MISTER_PERF_SCOPE_PRESENT);
@@ -273,9 +321,10 @@ void RenderDevice::RefreshWindow()
 
 void RenderDevice::GetWindowSize(int32 *width, int32 *height)
 {
-    // 4:3 native placeholder. Phase 2 wires pixWidth to 320.
+    // Phase 9: report the active runtime width (320 for 4:3, 424 for 16:9)
+    // rather than a hardcoded 320 placeholder.
     if (width)
-        *width = 320;
+        *width = nv_frame_width_runtime;
     if (height)
         *height = SCREEN_YSIZE;
 }

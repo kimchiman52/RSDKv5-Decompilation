@@ -8,26 +8,41 @@
 extern "C" {
 #endif
 
-// Writer constants — must match Phase 4 RTL exactly.
-// (Values repeated as defines here for ARM-side consumers that want to check
-//  the contract from test harnesses; also canonical source for the .c file.)
+// Phase 9: dimensions are RUNTIME-configurable to support dual-aspect
+// (4:3 320x240 / 16:9 424x240). Defaults match the 4:3 mode for backward
+// compatibility if NativeVideoWriter_SetDims is not called.
 //
-// Fragility note: NV_FRAME_BYTES is derived from NV_FRAME_WIDTH *
-// NV_FRAME_HEIGHT * 2 via macro expansion. A downstream TU that redefines
-// NV_FRAME_WIDTH (whether via #define or -D) before including this header
-// would silently diverge NV_FRAME_BYTES. Phase 2 accepts this fragility to
-// match 3sx's macro style. Phase 6 should switch these to
-// static const uint32_t + _Static_assert once the toolchain surface
-// guarantees C11.
+// Address invariants (FPGA-side fixed for both aspects):
+//   NV_DDR_PHYS_BASE   = 0x3A000000  (unchanged)
+//   NV_DDR_REGION_SIZE = 0x00080000  (BUMPED from 0x60000 to fit 16:9 buffers:
+//                                     2 * 203,520 + 256 = 407,296 B exceeds
+//                                     the old 393,216 B region)
+//   NV_CTRL_OFFSET     = 0x00000000  (unchanged)
+//   NV_FEEDBACK_OFFSET = 0x00000040  (unchanged)
+//   NV_BUF0_OFFSET     = 0x00000100  (unchanged - the FPGA reader hardcodes
+//                                     CTRL_ADDR/BUF0_ADDR; only BUF1_ADDR is
+//                                     aspect-keyed there)
+//
+// Runtime-set fields (derived from aspect):
+//   nv_frame_width_runtime, nv_frame_height_runtime, nv_frame_bytes_runtime,
+//   nv_buf1_offset_runtime
 #define NV_DDR_PHYS_BASE    0x3A000000u
-#define NV_DDR_REGION_SIZE  0x00060000u   /* 384 KB — two 153,600 B buffers + ctrl + feedback + slack */
+#define NV_DDR_REGION_SIZE  0x00080000u   /* 512 KB — fits 2 * 203,520 B (16:9) + ctrl + feedback */
 #define NV_CTRL_OFFSET      0x00000000u
 #define NV_FEEDBACK_OFFSET  0x00000040u
 #define NV_BUF0_OFFSET      0x00000100u   /* ctrl (4 B at 0x00) + feedback (8 B at 0x40-0x47) + 244 B pad */
-#define NV_BUF1_OFFSET      0x00025900u   /* NV_BUF0_OFFSET + NV_FRAME_BYTES = 0x100 + 0x25800 */
-#define NV_FRAME_WIDTH      320
-#define NV_FRAME_HEIGHT     240
-#define NV_FRAME_BYTES      (NV_FRAME_WIDTH * NV_FRAME_HEIGHT * 2)  /* 153,600 */
+
+extern int      nv_frame_width_runtime;
+extern int      nv_frame_height_runtime;
+extern uint32_t nv_frame_bytes_runtime;
+extern uint32_t nv_buf1_offset_runtime;
+
+/// Configure the runtime dimensions. Should be called BEFORE
+/// NativeVideoWriter_Init so the mmap covers the correct region.
+/// If never called, defaults to 4:3 (320x240).
+///   width=320,  height=240 -> 4:3  (frame_bytes=153,600, buf1_offset=0x25900)
+///   width=424,  height=240 -> 16:9 (frame_bytes=203,520, buf1_offset=0x31C00)
+void NativeVideoWriter_SetDims(int width, int height);
 
 /// Initialize the DDR3 direct writer for FPGA native video output.
 /// Maps /dev/mem at the native video buffer region (0x3A000000) and clears
@@ -38,12 +53,13 @@ bool    NativeVideoWriter_Init(void);
 /// Release DDR3 mapping and close /dev/mem.
 void    NativeVideoWriter_Shutdown(void);
 
-/// Write one RGB565 frame (320x240) into the inactive DDR3 double-buffer,
-/// then flip the control word so the FPGA reads from the freshly-written buffer.
+/// Write one RGB565 frame into the inactive DDR3 double-buffer, then flip the
+/// control word so the FPGA reads from the freshly-written buffer.
 /// @param pixels_rgb565  Source pixel data in RGB565 format.
-/// @param width          Must be NV_FRAME_WIDTH (320).
-/// @param height         Must be NV_FRAME_HEIGHT (240).
-/// @param pitch_bytes    Row stride in bytes (NV_FRAME_WIDTH*2 = 640 if contiguous).
+/// @param width          Must equal nv_frame_width_runtime (320 for 4:3,
+///                       424 for 16:9 after NativeVideoWriter_SetDims).
+/// @param height         Must equal nv_frame_height_runtime (240 for both modes).
+/// @param pitch_bytes    Row stride in bytes (width*2 if contiguous).
 ///                       Renamed from 3sx's "pitch" to prevent callers from
 ///                       passing RSDK's ScreenInfo::pitch (uint16 pixels)
 ///                       directly without multiplying by sizeof(uint16).

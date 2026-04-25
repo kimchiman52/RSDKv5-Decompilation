@@ -142,6 +142,13 @@ const RenderVertex rsdkVertexBuffer[24] =
 #elif RETRO_RENDERDEVICE_EGL
 #include "EGL/EGLRenderDevice.cpp"
 #elif RETRO_RENDERDEVICE_MISTER
+// Phase 9 P-2.2: MiSTerRenderDevice.cpp uses getenv/atoi (SONIC_MANIA_ASPECT,
+// SONIC_MANIA_FPS_OVERLAY). Pulling <cstdlib> via <cmath> in RetroEngine.hpp
+// is libstdc++-specific and not standard-mandated. Include explicitly here so
+// the backend stays portable across libstdc++/libc++ and stricter -std modes.
+// Cannot live in MiSTerRenderDevice.cpp itself per the textual-include rule
+// at the top of that file.
+#include <cstdlib>
 #include "MiSTer/NativeVideoWriter.h"   // Phase 2: writer C API, must precede the .cpp include
 #include "MiSTer/MiSTerRenderDevice.cpp"
 #endif
