@@ -12,6 +12,10 @@ using namespace RSDK;
 #include <stdexcept>
 #include <functional>
 
+#if defined(RSDK_USE_MISTER)
+#include <cstdlib>  // Phase 9: getenv() for SONIC_MANIA_MODS gate at LoadMods chokepoint
+#endif
+
 #if RETRO_PLATFORM != RETRO_ANDROID
 namespace fs = std::filesystem;
 #else
@@ -199,6 +203,21 @@ void RSDK::InitModAPI(bool32 getVersion)
 
     superLevels.clear();
     inheritLevel = 0;
+
+#if defined(RSDK_USE_MISTER)
+    // Phase 9 chokepoint: SONIC_MANIA_MODS=0 (status[10]=0 = "Off") skips
+    // the LoadMods scan + load entirely. Three call sites in this codebase
+    // (RetroEngine.cpp, Link.cpp x2) reach InitModAPI on startup; gating
+    // here covers all of them with one branch. Function tables above are
+    // harmless when mods are off, so we still register them.
+    {
+        const char *mods_env = ::getenv("SONIC_MANIA_MODS");
+        if (mods_env && mods_env[0] == '0') {
+            PrintLog(PRINT_NORMAL, "Phase 9: SONIC_MANIA_MODS=0 -> skipping LoadMods");
+            return;
+        }
+    }
+#endif
     LoadMods(false, getVersion);
 }
 
