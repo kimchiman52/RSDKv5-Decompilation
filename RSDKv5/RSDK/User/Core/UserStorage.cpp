@@ -1,13 +1,8 @@
 #include "RSDK/Core/RetroEngine.hpp"
 
-#if defined(RSDK_USE_MISTER)
-// Phase 7 Step 4: MiSTer routes user files to ./saves/ (relative to
-// APP_DIR — the launcher cd's to APP_DIR before exec). We mkdir() the
-// directory at engine init so first-run is well-defined even if the
-// release ZIP's empty saves/ entry was dropped during extraction.
-#include <sys/stat.h>
-#include <sys/types.h>
-#endif
+// Phase 7 Step 4 (revised): MiSTer uses APP_DIR "./" directly for user
+// files AND data-pack lookup. See InitUserDirectory() RSDK_USE_MISTER
+// arm at ~line 1161 for rationale.
 
 #if RETRO_REV02
 
@@ -1160,23 +1155,25 @@ void RSDK::SKU::InitUserDirectory()
 {
 #if defined(RSDK_USE_MISTER)
 
-    // MiSTer: route user files (SGame.bin, Replay_*.bin, Settings.ini,
-    // log.txt, gamecontrollerdb.txt) to a dedicated ./saves/ subdirectory
-    // so future release-zip upgrades can replace bin/, lib/, and scripts/
-    // without colliding with save data. The launcher (run-mania.sh) cd's
-    // to APP_DIR (/media/fat/games/sonic-mania/) before exec, so the
-    // relative path resolves predictably.
+    // MiSTer: use APP_DIR directly for user files AND data-pack lookup.
+    // userFileDir is the prefix for ALL file I/O in RSDKv5 — both save
+    // data (SGame.bin, Replay_*.bin, Settings.ini, log.txt,
+    // gamecontrollerdb.txt) AND data-pack lookup (Data.rsdk). See
+    // UserCore.cpp:313 LoadDataPack(..., "Data.rsdk", ...) which also
+    // goes through userFileDir via the RSDK storage layer.
+    //
+    // Earlier Phase 7 attempt used "./saves/" to isolate saves from the
+    // release-zip upgrade path. That broke Data.rsdk lookup because the
+    // engine doesn't split user-save vs data-pack dirs — both flow
+    // through userFileDir. Revert to "./" (same as generic Linux arm at
+    // line 1193) so Data.rsdk at APP_DIR root is found. Save/upgrade
+    // collision concern is deferred.
     //
     // This arm MUST come before the RETRO_LINUX arm because MiSTer also
-    // reports RETRO_PLATFORM == RETRO_LINUX; without the explicit
-    // short-circuit MiSTer would fall through to the generic Linux
-    // "./" path and lose the saves/ routing.
-    char buffer[0x100];
-    sprintf_s(buffer, sizeof(buffer), "./saves/");
-    (void)mkdir(buffer, 0755); // ignore EEXIST; if mkdir fails for
-                               // permission/RO reasons the engine logs
-                               // "Nope!" on the first save and continues
-    SKU::SetUserFileCallbacks(buffer, NULL, NULL);
+    // reports RETRO_PLATFORM == RETRO_LINUX; the explicit short-circuit
+    // keeps the MiSTer-specific intent visible in the source even
+    // though the current value matches the Linux fallback.
+    SKU::SetUserFileCallbacks("./", NULL, NULL);
 
 #elif RETRO_PLATFORM == RETRO_OSX
 
