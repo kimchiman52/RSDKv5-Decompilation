@@ -100,6 +100,26 @@ bool RenderDevice::SetupRendering()
         return false;
     InitVertexBuffer();
     GetDisplays();
+    InitShaders();
+
+    // Phase 5 fix: allocate the global `scanlines` buffer used by parallax /
+    // scene rendering. EVERY other RSDKv5 backend does this inside
+    // SetupRendering (SDL2RenderDevice.cpp:608-610, DX9:964-965, DX11:1385-86,
+    // GLFW:156-157, VK:443-444, EGL:223-224). If we skip it, `scanlines`
+    // stays NULL and the first call to ProcessParallax() / DrawLayerHScroll /
+    // DrawLayerVScroll SIGSEGVs (`scanline = scanlines; scanline->position.x = ...`).
+    // Gdb confirmed this is the cause of the armhf Logos-scene crash — the
+    // Mac build happens to survive because macOS's NULL page behavior differs.
+    int32 size = videoSettings.pixWidth >= SCREEN_YSIZE ? videoSettings.pixWidth : SCREEN_YSIZE;
+    if (!scanlines) {
+        scanlines = (ScanlineInfo *)malloc(size * sizeof(ScanlineInfo));
+        if (scanlines) memset(scanlines, 0, size * sizeof(ScanlineInfo));
+    }
+    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::SetupRendering: allocated scanlines[%d] = %p", size, scanlines);
+
+    videoSettings.windowState = WINDOWSTATE_ACTIVE;
+    videoSettings.dimMax      = 1.0;
+    videoSettings.dimPercent  = 1.0;
     return true;
 }
 
