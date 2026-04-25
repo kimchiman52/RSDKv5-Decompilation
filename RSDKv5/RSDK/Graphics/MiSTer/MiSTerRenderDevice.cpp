@@ -58,19 +58,40 @@ bool RenderDevice::Init()
     // crashes that gdb masks.
     SigHandler_Init();
 
-    // Phase 9 scope cut: pixWidth hardcoded to 320 (4:3 NTSC-exact mode).
-    // 16:9 widescreen deferred to Phase 10 (requires altpll_reconfig — Cyclone V
-    // hdmi_clk_sw clock-select primitive rejects cascaded clock muxes, so the
-    // dual-PLL static path is architecturally impossible). Must overwrite
-    // unconditionally because LoadSettingsINI() may have read a stale value.
-    videoSettings.pixWidth = 320;
-    PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::Init: pixWidth=%d SCREEN_YSIZE=%d", videoSettings.pixWidth, SCREEN_YSIZE);
+    // Phase 10: per-RBF static aspect ratio. The wrapper detects which RBF
+    // MiSTer loaded (Sonic_Mania.rbf vs Sonic_Mania_169.rbf) and emits
+    // SONIC_MANIA_ASPECT="4:3" or "widescreen" before exec'ing this binary.
+    //
+    // Phase 9 scope cut killed the runtime-toggle dual-aspect path (Cyclone V
+    // hdmi_clk_sw rejects cascaded clock muxes; altpll_reconfig is the only
+    // runtime path and was over-budget). Phase 10's "Option A" sidesteps that
+    // by shipping two RBFs instead — each RBF carries a single static PLL
+    // config, modeline, and DDR3 buffer geometry; this binary just reads the
+    // env var and picks 320 vs 424 to match.
+    //
+    // Must overwrite videoSettings.pixWidth unconditionally because
+    // LoadSettingsINI() may have populated a stale value from a previous run.
+    {
+        // The wrapper (vendor/Main_MiSTer/sonicmania_wrapper.cpp) writes
+        // SONIC_MANIA_ASPECT in lowercase ("widescreen" or "4:3"), so a
+        // plain strcmp is sufficient. We accept "16:9" and "169" too in
+        // case the env is set manually for testing.
+        const char *aspect_env = getenv("SONIC_MANIA_ASPECT");
+        const bool widescreen = (aspect_env != NULL) &&
+                                (strcmp(aspect_env, "widescreen") == 0 ||
+                                 strcmp(aspect_env, "16:9")        == 0 ||
+                                 strcmp(aspect_env, "169")         == 0);
+        videoSettings.pixWidth = widescreen ? 424 : 320;
+        PrintLog(PRINT_NORMAL,
+                 "MiSTerRenderDevice::Init: SONIC_MANIA_ASPECT=%s -> aspect=%s pixWidth=%d SCREEN_YSIZE=%d",
+                 aspect_env ? aspect_env : "(unset)",
+                 widescreen ? "widescreen" : "4:3",
+                 videoSettings.pixWidth, SCREEN_YSIZE);
 
-    // Phase 9: keep the runtime-dim plumbing in place (Phase 10 will use it
-    // when altpll_reconfig lands). Always pass (320, SCREEN_YSIZE) for now.
-    // MUST happen before NativeVideoWriter_Init() runs so the mmap covers the
-    // correct region.
-    NativeVideoWriter_SetDims(320, (int)SCREEN_YSIZE);
+        // MUST happen before NativeVideoWriter_Init() runs so the DDR3 mmap
+        // covers the correct region (BUF1 offset depends on frame size).
+        NativeVideoWriter_SetDims(videoSettings.pixWidth, (int)SCREEN_YSIZE);
+    }
 
     // Phase 9: SONIC_MANIA_FPS_OVERLAY env var seeds the static overlay state.
     //   "0" -> off
