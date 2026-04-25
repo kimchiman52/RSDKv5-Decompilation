@@ -52,6 +52,12 @@ static unsigned long long s_prevFrameNs = 0;
 
 bool RenderDevice::Init()
 {
+    // Install fatal-signal handlers first so any crash downstream prints a
+    // backtrace + register state + /proc/self/maps to stderr (which the
+    // wrapper dup2's to last-run.log). Lets us diagnose wrapper-context
+    // crashes that gdb masks.
+    SigHandler_Init();
+
     // Clamp pixWidth to MiSTer native resolution. Decision #1 (phase-2-plan.md).
     // Must be the FIRST statement so SetupRendering -> InitGraphicsAPI ->
     // SetScreenSize observe the clamped value. LoadSettingsINI() may have

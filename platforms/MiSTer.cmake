@@ -144,7 +144,17 @@ target_sources(RetroEngine PRIVATE
     # namespaces. See the long comment block at the top of MiSTerPacer.hpp.
     RSDKv5/RSDK/Graphics/MiSTer/MiSTerPacer.hpp
     RSDKv5/RSDK/Graphics/MiSTer/MiSTerPacer.cpp
+    # Fatal-signal backtrace handler (diagnostics for wrapper-context crashes
+    # that gdb masks). Standalone C TU; links against libc/glibc's
+    # backtrace() / backtrace_symbols_fd() via <execinfo.h>.
+    RSDKv5/RSDK/Graphics/MiSTer/SigHandler.h
+    RSDKv5/RSDK/Graphics/MiSTer/SigHandler.c
 )
+
+# Link -rdynamic so backtrace_symbols_fd gets readable function names for
+# symbols in the main executable (otherwise it only resolves shared-lib
+# symbols). Minor binary-size cost; on by default in many distros anyway.
+target_link_options(RetroEngine PRIVATE -rdynamic)
 
 # --- MiSTer defines -------------------------------------------------------
 # We do NOT set RETRO_RENDERDEVICE_MISTER=1 here via target_compile_definitions:

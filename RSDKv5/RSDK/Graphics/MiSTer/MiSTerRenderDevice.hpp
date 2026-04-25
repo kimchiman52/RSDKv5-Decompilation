@@ -13,6 +13,7 @@
 #include <SDL2/SDL.h>
 
 #include "MiSTerPacer.hpp"
+#include "SigHandler.h"
 
 using ShaderEntry = ShaderEntryBase;
 
