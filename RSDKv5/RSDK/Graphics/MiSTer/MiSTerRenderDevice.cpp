@@ -292,11 +292,28 @@ void RenderDevice::FlipScreen()
     }
     s_prevFrameNs = now;
 
-    if (showFPSOverlay && currentScreen == &screens[0]) {
+    if (showFPSOverlay) {
         // DrawDevString writes into currentScreen->frameBuffer (RGB565) and
-        // clips against currentScreen->size. Overlay lives at (2,2) top-left
-        // in green — avoids Mania's HUD which is top-center and top-right.
+        // clips against currentScreen->size. We KNOW screens[0].frameBuffer
+        // is what NativeVideoWriter copies below, so pin currentScreen to
+        // it for the duration of the draw — the previous `currentScreen ==
+        // &screens[0]` guard was silently skipping the overlay whenever the
+        // engine left currentScreen pointing somewhere else (e.g. NULL after
+        // certain state transitions, or a different screen in multi-screen
+        // modes that Mania doesn't use). User reported "no FPS counter no
+        // matter the setting" with showFPSOverlay=1 in the log — this is the
+        // fix. Overlay at (2,2) top-left in green.
+        ScreenInfo *saved_screen = currentScreen;
+        currentScreen = &screens[0];
         DrawDevString(fpsLabel, 2, 2, ALIGN_LEFT, 0x00FF00);
+        currentScreen = saved_screen;
+        static bool s_fps_logged_once = false;
+        if (!s_fps_logged_once) {
+            PrintLog(PRINT_NORMAL,
+                     "MiSTerRenderDevice: FPS overlay first-draw (label=\"%s\" x=2 y=2)",
+                     fpsLabel);
+            s_fps_logged_once = true;
+        }
     }
 
     NativeVideoWriter_WriteFrame(screens[0].frameBuffer,
