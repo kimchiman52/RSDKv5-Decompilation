@@ -176,6 +176,12 @@ target_compile_definitions(RetroEngine PRIVATE
     # ENABLE_PERF_TELEMETRY: forwarded as a compile define so future perf-
     # gating (Phase 6) can pick it up. Harmless when unused.
     ENABLE_PERF_TELEMETRY=$<BOOL:${ENABLE_PERF_TELEMETRY}>
+    # Phase 10b: 224p compile-time override. Sonic Mania renders 240 lines by
+    # default; standard NTSC 240p console sources emit 224 active lines, which
+    # is what typical CRT geometry expects. Upstream blessed this override via
+    # PR #201's `#ifndef SCREEN_YSIZE` guard. videoSettings.pixHeight
+    # propagates through the engine's renderer to game logic.
+    SCREEN_YSIZE=224
 )
 
 # Phase 6 — closed-loop pacer lead time. The pacer targets
