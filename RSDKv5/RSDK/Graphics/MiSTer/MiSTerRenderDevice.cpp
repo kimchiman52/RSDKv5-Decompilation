@@ -179,6 +179,18 @@ bool RenderDevice::SetupRendering()
     }
     PrintLog(PRINT_NORMAL, "MiSTerRenderDevice::SetupRendering: allocated scanlines[%d] = %p", size, scanlines);
 
+    // Match upstream backends (SDL2:505, DX9:631, EGL:353): zero per-screen
+    // framebuffers so the first composite of each scene doesn't inherit
+    // residue from BSS / a previous LoadScene. Without this, the static
+    // RGB565 buffer holds stale pixels from the previous scene's last frame
+    // until the new scene fully overwrites every row — which doesn't happen
+    // on the first frame after a heavy LoadScene transition (intro->Stage1,
+    // stage->UFO Special), producing a brief "black + 1px-bottom-strip"
+    // glitch where the new scene's first partial draw lands on top of the
+    // previous fadeout.
+    for (int32 s = 0; s < SCREEN_COUNT; ++s)
+        memset(&screens[s].frameBuffer, 0, sizeof(screens[s].frameBuffer));
+
     videoSettings.windowState = WINDOWSTATE_ACTIVE;
     videoSettings.dimMax      = 1.0;
     videoSettings.dimPercent  = 1.0;

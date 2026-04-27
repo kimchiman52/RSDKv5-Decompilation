@@ -299,6 +299,16 @@ void RSDK::LoadSceneAssets()
     if (screens[0].size.y > 0)
         memset(gfxLineBuffer, 0, screens[0].size.y * sizeof(uint8));
 
+    // MiSTer: also wipe the per-screen framebuffer between scenes. Other
+    // backends don't need this — they upload to GPU each frame and the
+    // window-system clears occlude any stale BSS pixels. The MiSTer port's
+    // FlipScreen DMAs the framebuffer straight to DDR3 each frame, so any
+    // row the new scene's first composite doesn't fully overwrite shows
+    // through from the previous scene's last frame (e.g. fade-to-black with
+    // a sliver of new content rasterized at a partial-init scroll position).
+    for (int32 s = 0; s < SCREEN_COUNT; ++s)
+        memset(&screens[s].frameBuffer, 0, sizeof(screens[s].frameBuffer));
+
     memset(tileLayers, 0, LAYER_COUNT * sizeof(TileLayer));
 
     // Reload palette
