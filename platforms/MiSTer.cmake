@@ -194,6 +194,37 @@ target_compile_definitions(RetroEngine PRIVATE
     MISTER_PACER_LEAD_TIME_US=${MISTER_PACER_LEAD_TIME_US}
 )
 
+# --- Optimization flags (audit T2-D) --------------------------------------
+# Goal: tighten the per-vertex inner loops in Scene3D.cpp (the dominant cost
+# in UFO Special Stage) without changing observable FP behavior. Adds:
+#   -O3              Explicit (CMake's Release default already sets this on
+#                    GCC/Clang, but we make it explicit to survive future
+#                    CMake changes and to apply uniformly even if the build
+#                    type is overridden).
+#   -fno-math-errno  Skip the libm errno store after math intrinsics. Mania
+#                    never reads errno after math calls; pure win for the
+#                    fixed-point + sin/cos/sqrt heavy 3D pipeline.
+#   -funroll-loops   Unroll inner loops where profitable. The per-vertex
+#                    inner loops in AddModelToScene have constant
+#                    faceVertCount within a model frame, so unrolling helps.
+#
+# Deliberately NOT added: -ffast-math. It re-associates FP and breaks
+# IEEE-754 corner cases (signed zeros, NaN propagation, denormals); the
+# Mania physics pipeline + scanline-callback math are mostly fixed-point
+# but the few floating bits (camera projection, lerp coefficients) are
+# touchy enough that we'd want targeted FP testing before flipping it on.
+#
+# Dropped: -flto=thin (LLVM ThinLTO). The cross-build sysroot's binutils ld
+# does not understand LLVM bitcode and segfaults at link time. Path forward
+# is to add `lld` to tools/mister/setup-build-container.sh and pass
+# `-fuse-ld=lld` here so the LLVM linker handles the bitcode merge step.
+# Deferred to a separate commit.
+target_compile_options(RetroEngine PRIVATE
+    -O3
+    -fno-math-errno
+    -funroll-loops
+)
+
 # --- ARM hardening --------------------------------------------------------
 # Applied ONLY when the cross toolchain's target triple is arm-linux-gnueabihf
 # (or armv7-ish), so a Mac-host iteration build of PLATFORM=MiSTer is a no-op
