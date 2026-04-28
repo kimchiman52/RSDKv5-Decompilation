@@ -544,6 +544,12 @@ void RSDK::AddModelToScene(uint16 modelFrames, uint16 sceneIndex, uint8 drawMode
                                 vertex->z = matWorld->values[2][3] + ((modelVert->x * matWorld->values[2][0]) >> 8)
                                             + ((matWorld->values[2][2] * modelVert->z >> 8) + (matWorld->values[2][1] * modelVert->y >> 8));
 
+                                // MiSTer T2-E: zero normals inline in non-normal branches so
+                                // Draw3DScene's *_SHADED reads of vertex->ny see a defined
+                                // value. Replaces the Prepare3DScene memset(scn->vertices,...).
+                                vertex->nx    = 0;
+                                vertex->ny    = 0;
+                                vertex->nz    = 0;
                                 vertex->color = color;
                             }
                         }
@@ -592,6 +598,11 @@ void RSDK::AddModelToScene(uint16 modelFrames, uint16 sceneIndex, uint8 drawMode
                                     vertex->z = matWorld->values[2][3] + ((matWorld->values[2][2] * modelVert->z) >> 8)
                                                 + ((matWorld->values[2][0] * modelVert->x >> 8) + (matWorld->values[2][1] * modelVert->y >> 8));
 
+                                    // MiSTer T2-E: matNormals==NULL branch — zero normals inline
+                                    // (replaces Prepare3DScene memset). See Scene3D.hpp comment.
+                                    vertex->nx    = 0;
+                                    vertex->ny    = 0;
+                                    vertex->nz    = 0;
                                     vertex->color = color;
                                 }
                             }
@@ -643,6 +654,11 @@ void RSDK::AddModelToScene(uint16 modelFrames, uint16 sceneIndex, uint8 drawMode
                                     vertex->z = matWorld->values[2][3] + (matWorld->values[2][2] * modelVert->z >> 8)
                                                 + (modelVert->y * matWorld->values[2][1] >> 8) + (modelVert->x * matWorld->values[2][0] >> 8);
 
+                                    // MiSTer T2-E: matNormals==NULL branch — zero normals inline
+                                    // (replaces Prepare3DScene memset). See Scene3D.hpp comment.
+                                    vertex->nx    = 0;
+                                    vertex->ny    = 0;
+                                    vertex->nz    = 0;
                                     vertex->color = modelColor->color;
                                 }
                             }
@@ -699,6 +715,10 @@ void RSDK::AddMeshFrameToScene(uint16 modelFrames, uint16 sceneIndex, Animator *
                                             + (matWorld->values[1][0] * x >> 8);
                                 vertex->z = matWorld->values[2][3] + ((x * matWorld->values[2][0]) >> 8)
                                             + ((matWorld->values[2][2] * z >> 8) + (matWorld->values[2][1] * y >> 8));
+                                // MiSTer T2-E: zero normals inline (replaces Prepare3DScene memset).
+                                vertex->nx    = 0;
+                                vertex->ny    = 0;
+                                vertex->nz    = 0;
                                 vertex->color = color;
                             }
                         }
@@ -755,6 +775,10 @@ void RSDK::AddMeshFrameToScene(uint16 modelFrames, uint16 sceneIndex, Animator *
                                                 + (matWorld->values[1][0] * x >> 8);
                                     vertex->z = matWorld->values[2][3] + ((matWorld->values[2][2] * z) >> 8)
                                                 + ((matWorld->values[2][0] * x >> 8) + (matWorld->values[2][1] * y >> 8));
+                                    // MiSTer T2-E: matNormals==NULL — zero normals inline.
+                                    vertex->nx    = 0;
+                                    vertex->ny    = 0;
+                                    vertex->nz    = 0;
                                     vertex->color = color;
                                 }
                             }
@@ -812,6 +836,10 @@ void RSDK::AddMeshFrameToScene(uint16 modelFrames, uint16 sceneIndex, Animator *
                                                 + (y * matWorld->values[1][1] >> 8);
                                     vertex->z = matWorld->values[2][3] + (matWorld->values[2][2] * z >> 8) + (y * matWorld->values[2][1] >> 8)
                                                 + (x * matWorld->values[2][0] >> 8);
+                                    // MiSTer T2-E: matNormals==NULL — zero normals inline.
+                                    vertex->nx    = 0;
+                                    vertex->ny    = 0;
+                                    vertex->nz    = 0;
                                     vertex->color = modelColor->color;
                                 }
                             }

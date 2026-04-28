@@ -150,14 +150,20 @@ inline void Prepare3DScene(uint16 sceneID)
 {
     if (sceneID < SCENE3D_COUNT) {
         Scene3D *scn = &scene3DList[sceneID];
-
+        // MiSTer T2-E: counter reset is the only state actually consumed by
+        // AddModel / Draw3DScene; AddModelToScene / AddMeshFrameToScene write
+        // vertices/normals/faceVertCounts/faceBuffer in linear order from
+        // index 0 up to vertexCount/faceCount, and the rasterizer reads only
+        // that range. The four memsets that used to live here were ~324 KB
+        // total for vertLimit=4096 scenes — costing ~23 ms/frame on UFO
+        // Special Stage where ~71 entities call Prepare3DScene each. The
+        // previous defensive role (zeroing nx/ny/nz so shaded drawmodes see
+        // ny=0 in branches of AddModelToScene that don't write normals) is
+        // now handled by inline `vert->n[xyz] = 0;` writes in those branches
+        // — see this commit's Scene3D.cpp diff (MODEL_NOFLAGS,
+        // MODEL_USECOLOURS, and matNormals==NULL paths).
         scn->vertexCount = 0;
         scn->faceCount   = 0;
-
-        memset(scn->vertices, 0, sizeof(Scene3DVertex) * scn->vertLimit);
-        memset(scn->normals, 0, sizeof(Scene3DVertex) * scn->vertLimit);
-        memset(scn->faceVertCounts, 0, sizeof(uint8) * scn->vertLimit);
-        memset(scn->faceBuffer, 0, sizeof(Scene3DFace) * scn->vertLimit);
     }
 }
 
