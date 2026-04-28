@@ -347,6 +347,10 @@ void RenderDevice::Release(bool32 isRefresh)
     // Release; adding it would cause double-release / double-free.
 
     if (!isRefresh) {
+        // Phase 12: emit per-class lifetime perf summary before tearing down.
+        // No-op when ENABLE_PERF_TELEMETRY is unset (clean flavor).
+        mister_perf_emit_run_summary();
+
         // Full shutdown only on the final teardown; Refresh is used by
         // the engine for windowed<->fullscreen transitions etc., which
         // are no-ops for our FPGA-driven scanout. See OQ-4 in phase-2-plan.md.

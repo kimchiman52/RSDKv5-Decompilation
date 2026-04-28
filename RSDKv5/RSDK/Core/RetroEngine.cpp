@@ -431,6 +431,11 @@ void RSDK::ProcessEngine()
             ProcessObjectDrawLists();
 #if defined(RSDK_USE_MISTER)
             mister_perf_end_scope(MISTER_PERF_SCOPE_RASTER);
+            // Phase 12 perf triage: must fire AFTER RASTER end_scope so
+            // the latest RASTER sample reflects this frame's outer total
+            // (not the previous frame's). Reads visible/drawn counts
+            // stashed by ProcessObjectDrawLists.
+            mister_perf_emit_spike_log();
 #endif
 
             break;
@@ -518,6 +523,7 @@ void RSDK::ProcessEngine()
                 ProcessObjectDrawLists();
 #if defined(RSDK_USE_MISTER)
                 mister_perf_end_scope(MISTER_PERF_SCOPE_RASTER);
+                mister_perf_emit_spike_log();
 #endif
                 engine.frameStep = false;
             }

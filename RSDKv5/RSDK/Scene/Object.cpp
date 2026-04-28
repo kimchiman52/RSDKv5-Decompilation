@@ -1,5 +1,15 @@
 #include "RSDK/Core/RetroEngine.hpp"
 
+#if defined(RSDK_USE_MISTER)
+#include "RSDK/Graphics/MiSTer/MiSTerPacer.hpp"
+// Phase 12 perf triage: catch a future engine OBJECT_COUNT bump that would
+// outgrow the per-class accumulator array in MiSTerPacer.cpp. Both are 1024
+// today; if one ever moves the other must too. Cheap compile-time guard.
+static_assert(MISTER_PERF_OBJECT_COUNT == OBJECT_COUNT,
+              "MISTER_PERF_OBJECT_COUNT must match engine OBJECT_COUNT — "
+              "bump MiSTerPacer.hpp when changing Scene/Object.hpp");
+#endif
+
 using namespace RSDK;
 
 #if RETRO_REV0U
@@ -722,6 +732,20 @@ void RSDK::ProcessFrozenObjects()
 void RSDK::ProcessObjectDrawLists()
 {
     if (sceneInfo.state != ENGINESTATE_LOAD && sceneInfo.state != (ENGINESTATE_LOAD | ENGINESTATE_STEPOVER)) {
+#if defined(RSDK_USE_MISTER)
+        // Phase 12 perf triage: per-frame per-class + per-layer accumulators.
+        // Reset at top, populated inline below, dumped at end of function.
+        // The class-name registration is one-shot; subsequent stage loads
+        // re-register the same names (idempotent in the perf TU).
+        mister_perf_class_reset();
+        mister_perf_layer_reset();
+        for (int32 o = 0; o < objectClassCount; ++o) {
+            if (objectClassList[o].name)
+                mister_perf_class_name_set((uint16_t)o, objectClassList[o].name);
+        }
+        int total_visible = 0;
+        int total_drawn   = 0;
+#endif
         for (int32 s = 0; s < videoSettings.screenCount; ++s) {
             currentScreen             = &screens[s];
             sceneInfo.currentScreenID = s;
@@ -740,8 +764,15 @@ void RSDK::ProcessObjectDrawLists()
                 if (engine.drawGroupVisible[l]) {
                     DrawList *list = &drawGroups[l];
 
-                    if (list->hookCB)
+                    if (list->hookCB) {
+#if defined(RSDK_USE_MISTER)
+                        mister_perf_begin_scope(MISTER_PERF_SCOPE_RASTER_HOOK);
+#endif
                         list->hookCB();
+#if defined(RSDK_USE_MISTER)
+                        mister_perf_end_scope(MISTER_PERF_SCOPE_RASTER_HOOK);
+#endif
+                    }
 
                     if (list->sorted) {
                         for (int32 e = 0; e < list->entityCount; ++e) {
@@ -756,13 +787,33 @@ void RSDK::ProcessObjectDrawLists()
                         }
                     }
 
+#if defined(RSDK_USE_MISTER)
+                    mister_perf_begin_scope(MISTER_PERF_SCOPE_RASTER_ENTITIES);
+#endif
                     for (int32 i = 0; i < list->entityCount; ++i) {
                         sceneInfo.entitySlot = list->entries[i];
                         validDraw            = false;
                         sceneInfo.entity     = &objectEntityList[list->entries[i]];
                         if (sceneInfo.entity->visible) {
-                            if (objectClassList[stageObjectIDs[sceneInfo.entity->classID]].draw)
+#if defined(RSDK_USE_MISTER)
+                            ++total_visible;
+                            uint64_t t0 = mister_perf_now_ns();
+#endif
+                            if (objectClassList[stageObjectIDs[sceneInfo.entity->classID]].draw) {
                                 objectClassList[stageObjectIDs[sceneInfo.entity->classID]].draw();
+#if defined(RSDK_USE_MISTER)
+                                ++total_drawn;
+#endif
+                            }
+#if defined(RSDK_USE_MISTER)
+                            // Bin under the entity's classID. stageObjectIDs maps
+                            // to the global slot (0..objectClassCount-1) which is
+                            // the index we used for name registration above.
+                            uint64_t dt = mister_perf_now_ns() - t0;
+                            uint16_t global_id =
+                                (uint16_t)stageObjectIDs[sceneInfo.entity->classID];
+                            mister_perf_class_accum(global_id, dt);
+#endif
 
 #if RETRO_VER_EGS || RETRO_USE_DUMMY_ACHIEVEMENTS
                             if (i == list->entityCount - 1)
@@ -772,18 +823,35 @@ void RSDK::ProcessObjectDrawLists()
                             sceneInfo.entity->onScreen |= validDraw << sceneInfo.currentScreenID;
                         }
                     }
+#if defined(RSDK_USE_MISTER)
+                    mister_perf_end_scope(MISTER_PERF_SCOPE_RASTER_ENTITIES);
+#endif
 
                     for (int32 i = 0; i < list->layerCount; ++i) {
                         TileLayer *layer = &tileLayers[list->layerDrawList[i]];
+#if defined(RSDK_USE_MISTER)
+                        int layer_idx = (int)list->layerDrawList[i];
+#endif
 
 #if RETRO_USE_MOD_LOADER
                         RunModCallbacks(MODCB_ONSCANLINECB, (void *)layer->scanlineCallback);
+#endif
+#if defined(RSDK_USE_MISTER)
+                        mister_perf_begin_scope(MISTER_PERF_SCOPE_RASTER_SCANLINE_CB);
+                        uint64_t cb_t0 = mister_perf_now_ns();
 #endif
                         if (layer->scanlineCallback)
                             layer->scanlineCallback(scanlines);
                         else
                             ProcessParallax(layer);
+#if defined(RSDK_USE_MISTER)
+                        mister_perf_layer_accum_cb(layer_idx,
+                                                   mister_perf_now_ns() - cb_t0);
+                        mister_perf_end_scope(MISTER_PERF_SCOPE_RASTER_SCANLINE_CB);
 
+                        mister_perf_begin_scope(MISTER_PERF_SCOPE_RASTER_TILES);
+                        uint64_t r_t0 = mister_perf_now_ns();
+#endif
                         switch (layer->type) {
                             case LAYER_HSCROLL: DrawLayerHScroll(layer); break;
                             case LAYER_VSCROLL: DrawLayerVScroll(layer); break;
@@ -791,6 +859,11 @@ void RSDK::ProcessObjectDrawLists()
                             case LAYER_BASIC: DrawLayerBasic(layer); break;
                             default: break;
                         }
+#if defined(RSDK_USE_MISTER)
+                        mister_perf_layer_accum_raster(layer_idx,
+                                                       mister_perf_now_ns() - r_t0);
+                        mister_perf_end_scope(MISTER_PERF_SCOPE_RASTER_TILES);
+#endif
                     }
 
 #if RETRO_USE_MOD_LOADER
@@ -1000,6 +1073,12 @@ void RSDK::ProcessObjectDrawLists()
             currentScreen++;
             sceneInfo.currentScreenID++;
         }
+#if defined(RSDK_USE_MISTER)
+        // Stash counts; the actual spike emit fires from RetroEngine.cpp
+        // after the outer RASTER scope closes, so we read this frame's
+        // (not last frame's) RASTER total.
+        mister_perf_record_frame_counts(total_visible, total_drawn);
+#endif
     }
 }
 
