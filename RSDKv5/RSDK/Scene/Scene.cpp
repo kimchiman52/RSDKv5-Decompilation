@@ -1,4 +1,5 @@
 #include "RSDK/Core/RetroEngine.hpp"
+#include <stdint.h>
 
 using namespace RSDK;
 
@@ -12,6 +13,66 @@ ScanlineInfo *RSDK::scanlines = NULL;
 TileLayer RSDK::tileLayers[LAYER_COUNT];
 CollisionMask RSDK::collisionMasks[CPATH_COUNT][TILE_COUNT * 4];
 TileInfo RSDK::tileInfo[CPATH_COUNT][TILE_COUNT * 4];
+
+static const uint16 ROTO_SOLID_UNKNOWN = 0xFFFF;
+static const uint16 ROTO_SOLID_MIXED   = 0xFFFE;
+static uint16 s_rotoSolidTileIndex[TILE_COUNT * 4];
+static bool32 s_rotoSolidTileCacheValid = false;
+
+void RSDK::InvalidateRotozoomSolidTileCache() { s_rotoSolidTileCacheValid = false; }
+
+static inline void EnsureRotozoomSolidTileCache()
+{
+    if (s_rotoSolidTileCacheValid)
+        return;
+
+    for (int32 i = 0; i < TILE_COUNT * 4; ++i) s_rotoSolidTileIndex[i] = ROTO_SOLID_UNKNOWN;
+    s_rotoSolidTileCacheValid = true;
+}
+
+static inline uint16 GetRotozoomSolidTileIndex(uint16 tile)
+{
+    tile &= 0xFFF;
+
+    uint16 cached = s_rotoSolidTileIndex[tile];
+    if (cached != ROTO_SOLID_UNKNOWN)
+        return cached;
+
+    uint8 *pixels = &RSDK::tilesetPixels[TILE_DATASIZE * tile];
+    uint8 first   = pixels[0];
+
+    for (int32 i = 1; i < TILE_DATASIZE; ++i) {
+        if (pixels[i] != first) {
+            s_rotoSolidTileIndex[tile] = ROTO_SOLID_MIXED;
+            return ROTO_SOLID_MIXED;
+        }
+    }
+
+    s_rotoSolidTileIndex[tile] = first;
+    return first;
+}
+
+static inline void FillRGB565(uint16 *dst, int32 count, uint16 color)
+{
+    if (count <= 0)
+        return;
+
+    if (((uintptr_t)dst & 3) && count) {
+        *dst++ = color;
+        --count;
+    }
+
+    uint32 packed = (uint32)color | ((uint32)color << 16);
+    uint32 *dst32 = (uint32 *)dst;
+    while (count >= 2) {
+        *dst32++ = packed;
+        count -= 2;
+    }
+
+    dst = (uint16 *)dst32;
+    if (count)
+        *dst = color;
+}
 
 #if RETRO_REV02
 bool32 RSDK::forceHardReset = false;
@@ -61,6 +122,7 @@ void RSDK::LoadSceneFolder()
         MEM_ZERO(tileLayers[l]);
         for (int32 c = 0; c < CAMERA_COUNT; ++c) tileLayers[l].drawGroup[c] = -1;
     }
+    InvalidateRotozoomSolidTileCache();
 
     SceneListInfo *list = &sceneInfo.listCategory[sceneInfo.activeCategory];
 #if RETRO_REV02
@@ -1021,6 +1083,8 @@ void RSDK::LoadStageGIF(char *filepath)
             dstPixels += (TILE_SIZE * 2);
         }
 
+        InvalidateRotozoomSolidTileCache();
+
 #if RETRO_USE_ORIGINAL_CODE
         tileset.palette = NULL;
         tileset.decoder = NULL;
@@ -1595,10 +1659,91 @@ void RSDK::DrawLayerVScroll(TileLayer *layer)
         ++frameBuffer;
     }
 }
+static void DrawLayerRotozoomSolidRuns(TileLayer *layer)
+{
+    if (!layer->xsize || !layer->ysize)
+        return;
+
+    EnsureRotozoomSolidTileCache();
+
+    uint16 *layout         = layer->layout;
+    uint8 *lineBuffer      = &gfxLineBuffer[currentScreen->clipBound_Y1];
+    ScanlineInfo *scanline = &scanlines[currentScreen->clipBound_Y1];
+    uint16 *frameBuffer    = &currentScreen->frameBuffer[currentScreen->clipBound_X1 + currentScreen->clipBound_Y1 * currentScreen->pitch];
+
+    int32 width    = (TILE_SIZE << layer->widthShift) - 1;
+    int32 height   = (TILE_SIZE << layer->heightShift) - 1;
+    int32 lineSize = currentScreen->clipBound_X2 - currentScreen->clipBound_X1;
+    int32 tileMaskX = width >> 4;
+    int32 tileMaskY = height >> 4;
+
+    for (int32 cy = currentScreen->clipBound_Y1; cy < currentScreen->clipBound_Y2; ++cy) {
+        int32 posX = scanline->position.x;
+        int32 posY = scanline->position.y;
+        int32 stepX = scanline->deform.x;
+        int32 stepY = scanline->deform.y;
+
+        uint16 *activePalette = fullPalette[*lineBuffer];
+        ++lineBuffer;
+        int32 fbOffset = currentScreen->pitch - lineSize;
+
+        for (int32 cx = 0; cx < lineSize;) {
+            int32 tx = posX >> 20;
+            int32 ty = posY >> 20;
+
+            int32 tileX = tileMaskX & tx;
+            int32 tileY = tileMaskY & ty;
+            uint16 tile = layout[tileX + (tileY << layer->widthShift)] & 0xFFF;
+
+            uint16 solidIndex = GetRotozoomSolidTileIndex(tile);
+            if (solidIndex != ROTO_SOLID_MIXED) {
+                int32 runPosX = posX + stepX;
+                int32 runPosY = posY + stepY;
+                int32 run     = 1;
+
+                while (cx + run < lineSize && ((tileMaskX & (runPosX >> 20)) == tileX)
+                       && ((tileMaskY & (runPosY >> 20)) == tileY)) {
+                    ++run;
+                    runPosX += stepX;
+                    runPosY += stepY;
+                }
+
+                if (solidIndex)
+                    FillRGB565(frameBuffer, run, activePalette[solidIndex]);
+
+                frameBuffer += run;
+                posX = runPosX;
+                posY = runPosY;
+                cx += run;
+                continue;
+            }
+
+            int32 x  = FROM_FIXED(posX) & 0xF;
+            int32 y  = FROM_FIXED(posY) & 0xF;
+            uint8 idx   = tilesetPixels[TILE_SIZE * (y + TILE_SIZE * tile) + x];
+
+            if (idx)
+                *frameBuffer = activePalette[idx];
+
+            posX += stepX;
+            posY += stepY;
+            ++frameBuffer;
+            ++cx;
+        }
+
+        frameBuffer += fbOffset;
+        ++scanline;
+    }
+}
 void RSDK::DrawLayerRotozoom(TileLayer *layer)
 {
     if (!layer->xsize || !layer->ysize)
         return;
+
+    if (layer->solidRotozoomRuns) {
+        DrawLayerRotozoomSolidRuns(layer);
+        return;
+    }
 
     uint16 *layout         = layer->layout;
     uint8 *lineBuffer      = &gfxLineBuffer[currentScreen->clipBound_Y1];

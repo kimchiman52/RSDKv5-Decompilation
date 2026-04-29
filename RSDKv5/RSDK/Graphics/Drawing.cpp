@@ -1,5 +1,9 @@
 #include "RSDK/Core/RetroEngine.hpp"
 
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
 using namespace RSDK;
 
 #if RETRO_REV0U
@@ -2015,9 +2019,23 @@ void RSDK::DrawFace(Vector2 *vertices, int32 vertCount, int32 r, int32 g, int32 
                         edge->end = currentScreen->clipBound_X2;
 
                     int32 count = edge->end - edge->start;
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                    if (count > 0) {
+                        uint16_t *fb_ptr = (uint16_t *)&frameBuffer[edge->start];
+                        uint16x8_t vColor = vdupq_n_u16(color16);
+                        int32 neon_end = count & ~7;
+                        for (int32 x = 0; x < neon_end; x += 8) {
+                            vst1q_u16(fb_ptr + x, vColor);
+                        }
+                        for (int32 x = neon_end; x < count; ++x) {
+                            fb_ptr[x] = color16;
+                        }
+                    }
+#else
                     for (int32 x = 0; x < count; ++x) {
                         frameBuffer[edge->start + x] = color16;
                     }
+#endif
                     ++edge;
                     frameBuffer += currentScreen->pitch;
                 }
@@ -2260,9 +2278,16 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     int32 deltaG = 0;
                     int32 deltaB = 0;
                     if (count > 0) {
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                        float inv_c = 1.0f / (float)count;
+                        deltaR = (int32)((float)(edge->endR - edge->startR) * inv_c);
+                        deltaG = (int32)((float)(edge->endG - edge->startG) * inv_c);
+                        deltaB = (int32)((float)(edge->endB - edge->startB) * inv_c);
+#else
                         deltaR = (edge->endR - edge->startR) / count;
                         deltaG = (edge->endG - edge->startG) / count;
                         deltaB = (edge->endB - edge->startB) / count;
+#endif
                     }
                     int32 startR = edge->startR;
                     int32 startG = edge->startG;
@@ -2290,6 +2315,41 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                         count     = currentScreen->clipBound_X2 - edge->start;
                     }
 
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                    {
+                        static const int32_t k_lane4[4] = {0, 1, 2, 3};
+                        int32x4_t vLane  = vld1q_s32(k_lane4);
+                        int32x4_t vR     = vmlaq_n_s32(vdupq_n_s32(startR), vLane, deltaR);
+                        int32x4_t vG     = vmlaq_n_s32(vdupq_n_s32(startG), vLane, deltaG);
+                        int32x4_t vB     = vmlaq_n_s32(vdupq_n_s32(startB), vLane, deltaB);
+                        int32x4_t vStepR = vdupq_n_s32(deltaR * 4);
+                        int32x4_t vStepG = vdupq_n_s32(deltaG * 4);
+                        int32x4_t vStepB = vdupq_n_s32(deltaB * 4);
+                        const int32x4_t kMaskG = vdupq_n_s32(0x7E0);
+                        const int32x4_t kMaskR = vdupq_n_s32(0xF800);
+                        uint16_t *fb_ptr = &frameBuffer[edge->start];
+                        int32 neon_end   = (count / 4) * 4;
+                        for (int32 x = 0; x < neon_end; x += 4) {
+                            int32x4_t packed = vorrq_s32(vorrq_s32(
+                                vandq_s32(vshrq_n_s32(vR, 8),  kMaskR),
+                                vandq_s32(vshrq_n_s32(vG, 13), kMaskG)),
+                                                          vshrq_n_s32(vB, 19));
+                            vst1_u16(fb_ptr + x, vmovn_u32(vreinterpretq_u32_s32(packed)));
+                            vR = vaddq_s32(vR, vStepR);
+                            vG = vaddq_s32(vG, vStepG);
+                            vB = vaddq_s32(vB, vStepB);
+                        }
+                        startR = vgetq_lane_s32(vR, 0);
+                        startG = vgetq_lane_s32(vG, 0);
+                        startB = vgetq_lane_s32(vB, 0);
+                        for (int32 x = neon_end; x < count; ++x) {
+                            frameBuffer[edge->start + x] = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
+                            startR += deltaR;
+                            startG += deltaG;
+                            startB += deltaB;
+                        }
+                    }
+#else
                     for (int32 x = 0; x < count; ++x) {
                         frameBuffer[edge->start + x] = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
 
@@ -2297,6 +2357,7 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                         startG += deltaG;
                         startB += deltaB;
                     }
+#endif
                     ++edge;
                     frameBuffer += currentScreen->pitch;
                 }
@@ -2310,9 +2371,16 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     int32 deltaG = 0;
                     int32 deltaB = 0;
                     if (count > 0) {
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                        float inv_c = 1.0f / (float)count;
+                        deltaR = (int32)((float)(edge->endR - edge->startR) * inv_c);
+                        deltaG = (int32)((float)(edge->endG - edge->startG) * inv_c);
+                        deltaB = (int32)((float)(edge->endB - edge->startB) * inv_c);
+#else
                         deltaR = (edge->endR - edge->startR) / count;
                         deltaG = (edge->endG - edge->startG) / count;
                         deltaB = (edge->endB - edge->startB) / count;
+#endif
                     }
                     int32 startR = edge->startR;
                     int32 startG = edge->startG;
@@ -2364,9 +2432,16 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     int32 deltaG = 0;
                     int32 deltaB = 0;
                     if (count > 0) {
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                        float inv_c = 1.0f / (float)count;
+                        deltaR = (int32)((float)(edge->endR - edge->startR) * inv_c);
+                        deltaG = (int32)((float)(edge->endG - edge->startG) * inv_c);
+                        deltaB = (int32)((float)(edge->endB - edge->startB) * inv_c);
+#else
                         deltaR = (edge->endR - edge->startR) / count;
                         deltaG = (edge->endG - edge->startG) / count;
                         deltaB = (edge->endB - edge->startB) / count;
+#endif
                     }
                     int32 startR = edge->startR;
                     int32 startG = edge->startG;
@@ -2417,9 +2492,16 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     int32 deltaG = 0;
                     int32 deltaB = 0;
                     if (count > 0) {
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                        float inv_c = 1.0f / (float)count;
+                        deltaR = (int32)((float)(edge->endR - edge->startR) * inv_c);
+                        deltaG = (int32)((float)(edge->endG - edge->startG) * inv_c);
+                        deltaB = (int32)((float)(edge->endB - edge->startB) * inv_c);
+#else
                         deltaR = (edge->endR - edge->startR) / count;
                         deltaG = (edge->endG - edge->startG) / count;
                         deltaB = (edge->endB - edge->startB) / count;
+#endif
                     }
                     int32 startR = edge->startR;
                     int32 startG = edge->startG;
@@ -2471,9 +2553,16 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     int32 deltaG = 0;
                     int32 deltaB = 0;
                     if (count > 0) {
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                        float inv_c = 1.0f / (float)count;
+                        deltaR = (int32)((float)(edge->endR - edge->startR) * inv_c);
+                        deltaG = (int32)((float)(edge->endG - edge->startG) * inv_c);
+                        deltaB = (int32)((float)(edge->endB - edge->startB) * inv_c);
+#else
                         deltaR = (edge->endR - edge->startR) / count;
                         deltaG = (edge->endG - edge->startG) / count;
                         deltaB = (edge->endB - edge->startB) / count;
+#endif
                     }
                     int32 startR = edge->startR;
                     int32 startG = edge->startG;
@@ -2526,9 +2615,16 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     int32 deltaG = 0;
                     int32 deltaB = 0;
                     if (count > 0) {
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                        float inv_c = 1.0f / (float)count;
+                        deltaR = (int32)((float)(edge->endR - edge->startR) * inv_c);
+                        deltaG = (int32)((float)(edge->endG - edge->startG) * inv_c);
+                        deltaB = (int32)((float)(edge->endB - edge->startB) * inv_c);
+#else
                         deltaR = (edge->endR - edge->startR) / count;
                         deltaG = (edge->endG - edge->startG) / count;
                         deltaB = (edge->endB - edge->startB) / count;
+#endif
                     }
                     int32 startR = edge->startR;
                     int32 startG = edge->startG;
@@ -2584,9 +2680,16 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     int32 deltaG = 0;
                     int32 deltaB = 0;
                     if (count > 0) {
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                        float inv_c = 1.0f / (float)count;
+                        deltaR = (int32)((float)(edge->endR - edge->startR) * inv_c);
+                        deltaG = (int32)((float)(edge->endG - edge->startG) * inv_c);
+                        deltaB = (int32)((float)(edge->endB - edge->startB) * inv_c);
+#else
                         deltaR = (edge->endR - edge->startR) / count;
                         deltaG = (edge->endG - edge->startG) / count;
                         deltaB = (edge->endB - edge->startB) / count;
+#endif
                     }
                     int32 startR = edge->startR;
                     int32 startG = edge->startG;
@@ -2631,9 +2734,16 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     int32 deltaG = 0;
                     int32 deltaB = 0;
                     if (count > 0) {
+#if defined(RSDK_USE_MISTER) && defined(__ARM_NEON__)
+                        float inv_c = 1.0f / (float)count;
+                        deltaR = (int32)((float)(edge->endR - edge->startR) * inv_c);
+                        deltaG = (int32)((float)(edge->endG - edge->startG) * inv_c);
+                        deltaB = (int32)((float)(edge->endB - edge->startB) * inv_c);
+#else
                         deltaR = (edge->endR - edge->startR) / count;
                         deltaG = (edge->endG - edge->startG) / count;
                         deltaB = (edge->endB - edge->startB) / count;
+#endif
                     }
                     int32 startR = edge->startR;
                     int32 startG = edge->startG;

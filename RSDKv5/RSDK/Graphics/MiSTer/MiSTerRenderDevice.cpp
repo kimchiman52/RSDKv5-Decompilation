@@ -275,6 +275,48 @@ static void MiSTer_UpdateFPSOverlay(unsigned long long frame_ns,
     }
 }
 
+// Friend's "cap completed-frame delivery, not frame start" sleep relocation
+// — but kept compatible with our closed-loop vsync feedback in UpdateFPSCap.
+// UpdateFPSCap computes the deadline (snap/blend against FPGA vsync); this
+// function honors that deadline by sleeping at the END of frame work rather
+// than the start. If the game/render work already exceeded budget, present
+// immediately and let advance-with-snap-back catch up.
+static void MiSTer_PaceBeforePresent(unsigned long long *now_ns)
+{
+    if (!now_ns || RenderDevice::pacerTargetFrameTimeNs == 0)
+        return;
+
+    unsigned long long now = *now_ns;
+
+    if (RenderDevice::pacerFrameDeadlineNs == 0)
+        RenderDevice::pacerFrameDeadlineNs = now + RenderDevice::pacerTargetFrameTimeNs;
+
+    if (now < RenderDevice::pacerFrameDeadlineNs) {
+        mister_pacer_sleep_until_ns(RenderDevice::pacerFrameDeadlineNs);
+        now = mister_pacer_now_ns();
+    }
+
+    // Jitter stats — measured against post-sleep deadline (same semantics as
+    // pre-friend code, just relocated to frame-end).
+    unsigned long long jitter_ns = (now > RenderDevice::pacerFrameDeadlineNs)
+                                       ? (now - RenderDevice::pacerFrameDeadlineNs)
+                                       : 0;
+    RenderDevice::pacerStatsFrames++;
+    if (jitter_ns > RenderDevice::pacerMaxJitterNs)
+        RenderDevice::pacerMaxJitterNs = jitter_ns;
+    RenderDevice::pacerJitterSumNs += jitter_ns;
+    if (jitter_ns > 500000ULL)
+        RenderDevice::pacerLateCount++;
+
+    // Advance deadline; guard against >1 frame behind. The closed-loop math
+    // in UpdateFPSCap will pull this toward FPGA vsync next frame.
+    RenderDevice::pacerFrameDeadlineNs += RenderDevice::pacerTargetFrameTimeNs;
+    if (now > RenderDevice::pacerFrameDeadlineNs + RenderDevice::pacerTargetFrameTimeNs)
+        RenderDevice::pacerFrameDeadlineNs = now + RenderDevice::pacerTargetFrameTimeNs;
+
+    *now_ns = now;
+}
+
 void RenderDevice::FlipScreen()
 {
     // Mania is single-screen; screens[0].frameBuffer holds the freshly-
@@ -294,11 +336,19 @@ void RenderDevice::FlipScreen()
         return;
     }
 
-    // SCOPE_PRESENT wraps the DDR3 memcpy + ctrl flip.
+    unsigned long long now = mister_pacer_now_ns();
+
+    // Cap completed-frame delivery, not frame start. If the frame was cheap,
+    // wait until the previous present + target interval. If game/render work
+    // already exceeded the 60 Hz budget, present immediately and let the next
+    // frame be paced from this actual delivery time. This avoids the old
+    // "miss 16.6 ms, fall to ~30 fps" behavior.
+    MiSTer_PaceBeforePresent(&now);
+
+    // SCOPE_PRESENT wraps only overlay + DDR3 memcpy + ctrl flip, not cap wait.
     mister_perf_begin_scope(MISTER_PERF_SCOPE_PRESENT);
 
     // --- Phase 6: FPS overlay (on-canvas, before WriteFrame) ---
-    unsigned long long now = mister_pacer_now_ns();
     if (s_prevFrameNs != 0 && showFPSOverlay) {
         MiSTer_UpdateFPSOverlay(now - s_prevFrameNs, pacerFeedback);
     }
@@ -894,18 +944,6 @@ void RenderDevice::ProcessEvent(SDL_Event event)
                     // Always-on (no devMenu gate) so dev testers can sample
                     // the ring buffer without opening the dev menu — which
                     // itself perturbs pacer cadence.
-                    //
-                    // P-2.7 review note on jitter semantics: the values
-                    // reported here measure (now - pacerFrameDeadlineNs)
-                    // AFTER the closed-loop 25%-blend correction in
-                    // UpdateFPSCap has already moved the deadline toward
-                    // the FPGA-observed vsync. They are NOT the raw
-                    // wake-up phase relative to true vsync. In the steady
-                    // state with vsync feedback engaged the two converge,
-                    // but during initial lock-on or after a snap the post-
-                    // blend deadline can mask underlying scheduler jitter.
-                    // Use phase_err in the F12 line (raw closed-loop
-                    // error before blend) for the true vsync-phase signal.
                     if (pacerStatsFrames > 0) {
                         unsigned long long avg_jitter_ns =
                             pacerJitterSumNs / pacerStatsFrames;
@@ -1019,14 +1057,19 @@ void RenderDevice::InitFPSCap()
 
 bool RenderDevice::CheckFPSCap()
 {
-    // MiSTer: always proceed; the closed-loop pacer in UpdateFPSCap owns
-    // the sleep. Returning false here would put us in a spin around
-    // ProcessEvents that wastes ARM cycles.
+    // MiSTer: always proceed. FlipScreen caps completed-frame delivery before
+    // publishing to DDR3; blocking here would pace frame starts and can turn
+    // an 18-20 ms frame into a 30 Hz cadence.
     return true;
 }
 
 void RenderDevice::UpdateFPSCap()
 {
+    // Closed-loop deadline math runs every frame, but the SLEEP itself is
+    // relocated to MiSTer_PaceBeforePresent at FlipScreen entry — see comment
+    // there. This avoids the old "miss 16.6 ms, fall to ~30 fps" pattern
+    // (sleeping at frame start adds dead time on top of an already-slow frame)
+    // while preserving the FPGA-vsync phase lock.
     mister_pacer_poll_feedback(&pacerFeedback);
 
     unsigned long long now_ns = mister_pacer_now_ns();
@@ -1040,58 +1083,36 @@ void RenderDevice::UpdateFPSCap()
                  "MiSTerRenderDevice: vsync feedback stale, falling back to open-loop");
     }
 
-    if (pacerFrameDeadlineNs == 0) {
+    if (pacerFrameDeadlineNs == 0)
         pacerFrameDeadlineNs = now_ns + pacerTargetFrameTimeNs;
-    }
 
-    // Closed-loop phase correction (ported from 3sx sdl_app.c:10679-10710).
-    // P-3.3 review fix: hoist the μs→ns conversion of the CMake-driven lead
-    // time into a named constant so the unit math is unambiguous at the use
-    // site below. MISTER_PACER_LEAD_TIME_US is set by platforms/MiSTer.cmake
-    // (default 2000 µs).
     static constexpr unsigned long long kPacerLeadTimeNs =
         (unsigned long long)MISTER_PACER_LEAD_TIME_US * 1000ULL;
 
     if (pacerFeedback.vsync_feedback_valid &&
         now_ns >= pacerFeedback.last_vsync_monotonic_ns) {
-        unsigned long long elapsed = now_ns - pacerFeedback.last_vsync_monotonic_ns;
-        unsigned long long frames_since = elapsed / pacerTargetFrameTimeNs;
-        unsigned long long next_vsync   = pacerFeedback.last_vsync_monotonic_ns
+        unsigned long long elapsed       = now_ns - pacerFeedback.last_vsync_monotonic_ns;
+        unsigned long long frames_since  = elapsed / pacerTargetFrameTimeNs;
+        unsigned long long next_vsync    = pacerFeedback.last_vsync_monotonic_ns
                                        + (frames_since + 1) * pacerTargetFrameTimeNs;
         unsigned long long ideal = (next_vsync > kPacerLeadTimeNs) ? (next_vsync - kPacerLeadTimeNs) : 0;
-        if (ideal <= now_ns) ideal += pacerTargetFrameTimeNs;
+        if (ideal <= now_ns)
+            ideal += pacerTargetFrameTimeNs;
 
-        int64 error = (int64)((long long)ideal - (long long)pacerFrameDeadlineNs);
+        int64 error                          = (int64)((long long)ideal - (long long)pacerFrameDeadlineNs);
         pacerFeedback.pacer_phase_error_ns = error;
-        if (error >  (int64)pacerTargetFrameTimeNs ||
+        if (error > (int64)pacerTargetFrameTimeNs ||
             error < -(int64)pacerTargetFrameTimeNs) {
             pacerFrameDeadlineNs = ideal;        // snap
-        } else {
+        }
+        else {
             pacerFrameDeadlineNs = (unsigned long long)
                 ((long long)pacerFrameDeadlineNs + error / 4);   // 25% blend
         }
-    } else {
+    }
+    else {
         pacerFeedback.pacer_phase_error_ns = 0;
     }
-
-    // Sleep until deadline.
-    if (now_ns < pacerFrameDeadlineNs) {
-        mister_pacer_sleep_until_ns(pacerFrameDeadlineNs);
-        now_ns = mister_pacer_now_ns();
-    }
-
-    // Jitter stats — measured against post-blend deadline.
-    unsigned long long jitter_ns = (now_ns > pacerFrameDeadlineNs)
-                                   ? (now_ns - pacerFrameDeadlineNs) : 0;
-    pacerStatsFrames++;
-    if (jitter_ns > pacerMaxJitterNs) pacerMaxJitterNs = jitter_ns;
-    pacerJitterSumNs += jitter_ns;
-    if (jitter_ns > 500000ULL) pacerLateCount++;
-
-    // Advance deadline; guard against >1 frame behind.
-    pacerFrameDeadlineNs += pacerTargetFrameTimeNs;
-    if (now_ns > pacerFrameDeadlineNs + pacerTargetFrameTimeNs)
-        pacerFrameDeadlineNs = now_ns + pacerTargetFrameTimeNs;
 }
 
 bool RenderDevice::InitShaders()

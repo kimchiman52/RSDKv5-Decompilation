@@ -89,11 +89,22 @@ struct Scene3DVertex {
     int32 ty;
 
     uint32 color;
+#if defined(RSDK_USE_MISTER)
+    uint32 outCode;
+#endif
 };
 
 struct Scene3DFace {
     int32 depth;
     int32 index;
+#if defined(RSDK_USE_MISTER)
+    uint32 color;
+    uint16 color16;
+    int16 top;
+    int16 bottom;
+    uint8 count;
+    uint8 flags;
+#endif
 };
 
 struct Scene3D {
@@ -102,6 +113,7 @@ struct Scene3D {
     Scene3DVertex *normals;
     Scene3DFace *faceBuffer;
     uint8 *faceVertCounts;
+    uint16 *faceVertexRefs;
 
     int32 projectionX;
     int32 projectionY;
@@ -121,6 +133,7 @@ struct Scene3D {
     uint16 vertLimit;
     uint16 vertexCount;
     uint16 faceCount;
+    uint16 faceRefCount;
     uint8 drawMode;
     uint8 scope;
 };
@@ -164,6 +177,7 @@ inline void Prepare3DScene(uint16 sceneID)
         // MODEL_USECOLOURS, and matNormals==NULL paths).
         scn->vertexCount = 0;
         scn->faceCount   = 0;
+        scn->faceRefCount = 0;
     }
 }
 

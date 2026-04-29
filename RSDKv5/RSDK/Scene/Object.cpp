@@ -2,12 +2,14 @@
 
 #if defined(RSDK_USE_MISTER)
 #include "RSDK/Graphics/MiSTer/MiSTerPacer.hpp"
+#if defined(ENABLE_PERF_TELEMETRY) && ENABLE_PERF_TELEMETRY
 // Phase 12 perf triage: catch a future engine OBJECT_COUNT bump that would
 // outgrow the per-class accumulator array in MiSTerPacer.cpp. Both are 1024
 // today; if one ever moves the other must too. Cheap compile-time guard.
 static_assert(MISTER_PERF_OBJECT_COUNT == OBJECT_COUNT,
               "MISTER_PERF_OBJECT_COUNT must match engine OBJECT_COUNT — "
               "bump MiSTerPacer.hpp when changing Scene/Object.hpp");
+#endif
 #endif
 
 using namespace RSDK;

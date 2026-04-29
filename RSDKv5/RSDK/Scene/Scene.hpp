@@ -124,6 +124,7 @@ struct TileLayer {
     int32 deformationData[0x400];
     int32 deformationDataW[0x400];
     void (*scanlineCallback)(ScanlineInfo *scanlines);
+    bool32 solidRotozoomRuns;
     uint16 scrollInfoCount;
     ScrollInfo scrollInfo[0x100];
     RETRO_HASH_MD5(name);
@@ -169,6 +170,7 @@ void LoadSceneFolder();
 void LoadSceneAssets();
 void LoadTileConfig(char *filepath);
 void LoadStageGIF(char *filepath);
+void InvalidateRotozoomSolidTileCache();
 
 void ProcessParallaxAutoScroll();
 void ProcessParallax(TileLayer *layer);
@@ -307,6 +309,8 @@ inline void CopyTile(uint16 dest, uint16 src, uint16 count)
             *destPixelsXY++ = *srcPixelsXY++;
         }
     }
+
+    InvalidateRotozoomSolidTileCache();
 }
 
 inline ScanlineInfo *GetScanlines() { return scanlines; }
