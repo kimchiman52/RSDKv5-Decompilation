@@ -130,6 +130,19 @@ static void SigHandler_EarlyInit(void) {
     SigHandler_Init();
     dprintf(2, "SigHandler: early-init via __attribute__((constructor)) complete\n");
 
+    /* Line-buffer stdout/stderr so the engine's PrintLog redirect (Debug.cpp:
+     * "elif defined(RSDK_USE_MISTER)") flushes after every '\n' instead of
+     * accumulating in a 4 KB userspace buffer. The wrapper has already
+     * dup2'd both fds to its long-lived osd-wrapper.log fd, so a flush-per-
+     * line is a single write() syscall to a regular file -- not the FAT32
+     * metadata sync that the old fOpen("a")+fclose path triggered. The
+     * benefit: PRINT_ERROR / PRINT_FATAL lines and the perf run-summary
+     * survive abnormal exits (SIGSEGV / SIGKILL) where _exit/abort skip
+     * stdio flushing. Matches the crash-survivability of the old
+     * per-call-fclose log.txt path without its FS overhead. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
     const char *home = getenv("SONIC_MANIA_HOME");
     if (home && home[0]) {
         if (chdir(home) == 0) {

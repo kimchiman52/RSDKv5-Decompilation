@@ -100,10 +100,22 @@ void RSDK::PrintLog(int32 mode, const char *message, ...)
             jni->env->CallVoidMethod(jni->thiz, writeLog, array, as);
 #elif RETRO_PLATFORM == RETRO_SWITCH
             printf("%s", outputString);
+#elif defined(RSDK_USE_MISTER)
+            // MiSTer: the wrapper has dup2'd stdout to a long-lived log fd
+            // (sonicmania_wrapper.cpp:redirect_stdio_to_log). Write through it
+            // so each PrintLog is one stdio buffer copy + an eventual write()
+            // on a flush, instead of the userFileDir log.txt path's
+            // fopen("a") + fwrite + fclose round-trip per call. That round-
+            // trip caused progressive frame-time degradation on heavy stages
+            // (Chemical Plant in particular), because every frame >8 ms
+            // emitted a perf-spike line which triggered FAT32 metadata
+            // sync — feedback loop: more spikes -> more disk I/O -> more
+            // spikes. Skip the file-write block below entirely on MiSTer.
+            fputs(outputString, stdout);
 #endif
         }
 
-#if !RETRO_USE_ORIGINAL_CODE && RETRO_PLATFORM != RETRO_ANDROID
+#if !RETRO_USE_ORIGINAL_CODE && RETRO_PLATFORM != RETRO_ANDROID && !defined(RSDK_USE_MISTER)
         char logPath[0x100];
         sprintf_s(logPath, sizeof(logPath), "%slog.txt", SKU::userFileDir);
         FileIO *file = fOpen(logPath, "a");

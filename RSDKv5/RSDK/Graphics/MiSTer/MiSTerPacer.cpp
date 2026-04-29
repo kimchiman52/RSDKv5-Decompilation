@@ -366,15 +366,17 @@ extern "C" double mister_perf_avg_scope_ms(int scope)
 //    contribution
 
 namespace RSDK {
-// Forward-declared from Dev/Debug.hpp so we can land output in the same
-// userFileDir/log.txt where the engine's PrintLog stream lives, not the
-// short-lived osd-wrapper.log that fprintf(stderr) hits via the wrapper's
-// stdio dup2. Use plain `int` to exactly match the underlying type of
-// RSDK's `int32` typedef (`typedef signed int int32` from
-// RetroEngine.hpp:19) so the C++ name mangling matches the engine's
-// definition. Don't substitute `int32_t` here even if it's identical
-// today — Itanium ABI mangles by canonical type name and a future stdint
-// swap could silently de-link.
+// Forward-declared from Dev/Debug.hpp so we can route output through the
+// engine's PrintLog stream. On MiSTer that stream goes to the wrapper's
+// osd-wrapper.log via Debug.cpp's `RSDK_USE_MISTER` arm (fputs(stdout) +
+// SigHandler line-buffer setup) -- this used to land in the FAT32-backed
+// userFileDir/log.txt with an fOpen("a")+fclose round-trip per call,
+// which caused progressive slowdown on heavy stages (Chemical Plant).
+// Use plain `int` to exactly match the underlying type of RSDK's `int32`
+// typedef (`typedef signed int int32` from RetroEngine.hpp:19) so the
+// C++ name mangling matches the engine's definition. Don't substitute
+// `int32_t` here even if it's identical today — Itanium ABI mangles by
+// canonical type name and a future stdint swap could silently de-link.
 void PrintLog(int mode, const char *message, ...);
 }  // namespace RSDK
 static constexpr int kPrintNormal = 0;
