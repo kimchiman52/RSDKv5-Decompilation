@@ -52,6 +52,12 @@ int32 RSDK::gamePadCount               = 0;
 #include "Paddleboat/PDBInputDevice.cpp"
 #endif
 
+#if defined(RSDK_USE_MISTER)
+// MiSTer joy SHM consumer -- handles MiSTercade and front-panel inputs that
+// don't surface as evdev /dev/input/event* devices the SDL2 backend can see.
+#include "MiSTer/MiSTerJoyInputDevice.cpp"
+#endif
+
 void RSDK::RemoveInputDevice(InputDevice *targetDevice)
 {
     if (targetDevice) {
@@ -131,12 +137,20 @@ void RSDK::InitInputDevices()
 #if RETRO_INPUTDEVICE_PDBOAT
     SKU::InitPaddleboatInputAPI();
 #endif
+
+#if defined(RSDK_USE_MISTER)
+    SKU::InitMiSTerJoyInputAPI();
+#endif
 }
 
 void RSDK::ReleaseInputDevices()
 {
 #if RETRO_INPUTDEVICE_SDL2
     SKU::ReleaseSDL2InputAPI();
+#endif
+
+#if defined(RSDK_USE_MISTER)
+    SKU::ReleaseMiSTerJoyInputAPI();
 #endif
 }
 
