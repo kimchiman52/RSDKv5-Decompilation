@@ -56,23 +56,32 @@ static_assert(offsetof(MisterJoyShm, joy_mask)      ==  8, "MiSTer joy SHM joy_m
 static_assert(offsetof(MisterJoyShm, left_stick_x)  == 16, "MiSTer joy SHM left_stick_x offset drift");
 static_assert(offsetof(MisterJoyShm, right_stick_x) == 20, "MiSTer joy SHM right_stick_x offset drift");
 
-// Bit layout from vendor/Main_MiSTer/user_io.h (JOY_RIGHT/LEFT/...).
-constexpr uint32 MJ_RIGHT = 0x0001;
-constexpr uint32 MJ_LEFT  = 0x0002;
-constexpr uint32 MJ_DOWN  = 0x0004;
-constexpr uint32 MJ_UP    = 0x0008;
-constexpr uint32 MJ_BTN1  = 0x0010;  // A    (jump)
-constexpr uint32 MJ_BTN2  = 0x0020;  // B
-constexpr uint32 MJ_BTN3  = 0x0040;  // Select
-constexpr uint32 MJ_BTN4  = 0x0080;  // Start
-constexpr uint32 MJ_X     = 0x0100;
-constexpr uint32 MJ_Y     = 0x0200;
-constexpr uint32 MJ_L     = 0x0400;  // BumperL
-constexpr uint32 MJ_R     = 0x0800;  // BumperR
-constexpr uint32 MJ_L2    = 0x1000;  // TriggerL
-constexpr uint32 MJ_R2    = 0x2000;  // TriggerR
-constexpr uint32 MJ_L3    = 0x4000;  // StickL click
-constexpr uint32 MJ_R3    = 0x8000;  // StickR click
+// Bit-to-button binding is governed by the CORE-SPECIFIC CONF_STR `J1` line,
+// not by user_io.h's JOY_BTN1..4 aliases. For Sonic Mania
+// (vendor/Menu_MiSTer/menu.sv:316):
+//   J1,A,B,X,Y,Select,Start;
+// → bit 4 = "A", bit 5 = "B", bit 6 = "X", bit 7 = "Y", bit 8 = "Select",
+//   bit 9 = "Start". This is the slot order the user's MiSTer "Define joy
+//   buttons" wizard uses (per-controller .map files at /media/fat/config/
+//   inputs/Sonic_Mania_input_<vid>_<pid>_v3.map).
+//
+// Earlier this file used the legacy user_io.h convention where
+// BTN3=Select / BTN4=Start, which mismatched the CONF_STR for cores that
+// expose >4 face buttons. Symptom: pressing physical Start on the pad
+// arrived at the engine as keyY (because slot 5 / bit 9 was being decoded
+// as MJ_Y), and Y was decoded as keyStart, etc. The new constants are
+// named after the CONF_STR slot label they correspond to so the contract
+// is explicit.
+constexpr uint32 MJ_RIGHT       = 0x0001;
+constexpr uint32 MJ_LEFT        = 0x0002;
+constexpr uint32 MJ_DOWN        = 0x0004;
+constexpr uint32 MJ_UP          = 0x0008;
+constexpr uint32 MJ_SLOT_A      = 0x0010;
+constexpr uint32 MJ_SLOT_B      = 0x0020;
+constexpr uint32 MJ_SLOT_X      = 0x0040;
+constexpr uint32 MJ_SLOT_Y      = 0x0080;
+constexpr uint32 MJ_SLOT_SELECT = 0x0100;
+constexpr uint32 MJ_SLOT_START  = 0x0200;
 
 static MisterJoyShm *g_mister_joy_shm    = nullptr;
 static int           g_mister_joy_shm_fd = -1;
@@ -139,8 +148,8 @@ void InputDeviceMiSTerJoy::UpdateInput()
 
     // inactiveTimer[1] tracks confirm-button activity (A/Start), used by the
     // RSDK menu auto-assign heuristic in GetFilteredInputDeviceID().
-    bool confirm_now  = (mask & (MJ_BTN1 | MJ_BTN4)) != 0;
-    bool confirm_prev = (prevMask & (MJ_BTN1 | MJ_BTN4)) != 0;
+    bool confirm_now  = (mask & (MJ_SLOT_A | MJ_SLOT_START)) != 0;
+    bool confirm_prev = (prevMask & (MJ_SLOT_A | MJ_SLOT_START)) != 0;
     if (confirm_now && !confirm_prev)
         this->inactiveTimer[1] = 0;
     else
@@ -162,22 +171,16 @@ void InputDeviceMiSTerJoy::ProcessInput(int32 controllerID)
 
     uint32 mask = g_mister_joy_shm->joy_mask[player];
 
-    bool stateUp       = (mask & MJ_UP)    != 0;
-    bool stateDown     = (mask & MJ_DOWN)  != 0;
-    bool stateLeft     = (mask & MJ_LEFT)  != 0;
-    bool stateRight    = (mask & MJ_RIGHT) != 0;
-    bool stateA        = (mask & MJ_BTN1)  != 0;
-    bool stateB        = (mask & MJ_BTN2)  != 0;
-    bool stateSelect   = (mask & MJ_BTN3)  != 0;
-    bool stateStart    = (mask & MJ_BTN4)  != 0;
-    bool stateX        = (mask & MJ_X)     != 0;
-    bool stateY        = (mask & MJ_Y)     != 0;
-    bool stateBumperL  = (mask & MJ_L)     != 0;
-    bool stateBumperR  = (mask & MJ_R)     != 0;
-    bool stateTriggerL = (mask & MJ_L2)    != 0;
-    bool stateTriggerR = (mask & MJ_R2)    != 0;
-    bool stateStickL   = (mask & MJ_L3)    != 0;
-    bool stateStickR   = (mask & MJ_R3)    != 0;
+    bool stateUp     = (mask & MJ_UP)          != 0;
+    bool stateDown   = (mask & MJ_DOWN)        != 0;
+    bool stateLeft   = (mask & MJ_LEFT)        != 0;
+    bool stateRight  = (mask & MJ_RIGHT)       != 0;
+    bool stateA      = (mask & MJ_SLOT_A)      != 0;
+    bool stateB      = (mask & MJ_SLOT_B)      != 0;
+    bool stateX      = (mask & MJ_SLOT_X)      != 0;
+    bool stateY      = (mask & MJ_SLOT_Y)      != 0;
+    bool stateSelect = (mask & MJ_SLOT_SELECT) != 0;
+    bool stateStart  = (mask & MJ_SLOT_START)  != 0;
 
     controller[controllerID].keyUp.press     |= stateUp;
     controller[controllerID].keyDown.press   |= stateDown;
@@ -185,17 +188,15 @@ void InputDeviceMiSTerJoy::ProcessInput(int32 controllerID)
     controller[controllerID].keyRight.press  |= stateRight;
     controller[controllerID].keyA.press      |= stateA;
     controller[controllerID].keyB.press      |= stateB;
-    // BTN3 doubles as Select per MiSTer's user_io.h alias, but on JAMMA
-    // cabs BTN3 is the third physical action button players reach for as
-    // jump #3. Mania's UFO_Player.c:243 jump check is keyA||keyB||keyC||keyX,
-    // so OR BTN3 into keyC as well -- gives 6-button cabs three jump
-    // buttons (BTN1/BTN2/BTN3 -> A/B/C) without losing the Select binding
-    // for menu screens.
-    controller[controllerID].keyC.press      |= stateSelect;
     controller[controllerID].keyX.press      |= stateX;
     controller[controllerID].keyY.press      |= stateY;
     controller[controllerID].keyStart.press  |= stateStart;
     controller[controllerID].keySelect.press |= stateSelect;
+    // keyC has no CONF_STR slot in Sonic Mania (J1 is A,B,X,Y,Select,Start)
+    // but Mania's UFO_Player.c:243 jump check OR's keyA|keyB|keyC|keyX, and
+    // some other game state checks read keyC. OR all 4 face buttons into
+    // keyC so any of them counts as a "jump" key for code that polls keyC.
+    controller[controllerID].keyC.press      |= stateA | stateB | stateX | stateY;
 
     float hL, vL, hR, vR;
     mister_axis_to_delta(g_mister_joy_shm->left_stick_x[player],
@@ -207,7 +208,6 @@ void InputDeviceMiSTerJoy::ProcessInput(int32 controllerID)
     vR = -vR;
 
 #if RETRO_REV02
-    stickL[controllerID].keyStick.press |= stateStickL;
     stickL[controllerID].hDelta = hL;
     stickL[controllerID].vDelta = vL;
     stickL[controllerID].keyUp.press    |= vL >  INPUT_DEADZONE;
@@ -215,12 +215,9 @@ void InputDeviceMiSTerJoy::ProcessInput(int32 controllerID)
     stickL[controllerID].keyLeft.press  |= hL < -INPUT_DEADZONE;
     stickL[controllerID].keyRight.press |= hL >  INPUT_DEADZONE;
 
-    stickR[controllerID].keyStick.press |= stateStickR;
     // Match SDL2InputDevice.cpp:138-139 right-stick h/v swap (long-standing
-    // upstream bug, but parity with the SDL2 backend matters more than
-    // correctness here -- Mania doesn't use the right stick for gameplay,
-    // and any port-specific divergence shows up as inconsistent stick
-    // behavior between USB pad and MiSTercade SHM input).
+    // upstream bug, but parity matters more than correctness here -- Mania
+    // doesn't use the right stick for gameplay).
     stickR[controllerID].hDelta = vR;
     stickR[controllerID].vDelta = hR;
     stickR[controllerID].keyUp.press    |= hR >  INPUT_DEADZONE;
@@ -228,15 +225,8 @@ void InputDeviceMiSTerJoy::ProcessInput(int32 controllerID)
     stickR[controllerID].keyLeft.press  |= vR < -INPUT_DEADZONE;
     stickR[controllerID].keyRight.press |= vR >  INPUT_DEADZONE;
 
-    triggerL[controllerID].keyBumper.press  |= stateBumperL;
-    triggerL[controllerID].keyTrigger.press |= stateTriggerL;
-    triggerL[controllerID].bumperDelta  = stateBumperL  ? 1.0f : 0.0f;
-    triggerL[controllerID].triggerDelta = stateTriggerL ? 1.0f : 0.0f;
-
-    triggerR[controllerID].keyBumper.press  |= stateBumperR;
-    triggerR[controllerID].keyTrigger.press |= stateTriggerR;
-    triggerR[controllerID].bumperDelta  = stateBumperR  ? 1.0f : 0.0f;
-    triggerR[controllerID].triggerDelta = stateTriggerR ? 1.0f : 0.0f;
+    // Mania's CONF_STR has no L/R/L2/R2/L3/R3 slots, so triggerL/R and
+    // stickL/R clicks are not exposed via SHM. Leave their state alone.
 #endif
 }
 
