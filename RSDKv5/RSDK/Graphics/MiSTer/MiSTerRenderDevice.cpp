@@ -382,10 +382,14 @@ void RenderDevice::GetWindowSize(int32 *width, int32 *height)
 //   single multiply per channel; see the caller for context. Constants from
 //   the standard 8-bit limited-range matrix (R=298C+409E, G=298C-100D-208E,
 //   B=298C+516D, all >>8 with +128 round-bias).
-// `compute_dest_rect`:  given source (sw,sh) and destination (dw,dh),
-//   return the centered intersection (dx, dy, copy_w, copy_h). When the
-//   source is larger we center-crop; smaller we letterbox. Caller handles
-//   the border fill.
+// Source-to-dest geometry for image/video textures is **stretch-to-fill** via
+// nearest-neighbor, matching upstream SDL2 (InitVertexBuffer at SDL2RenderDevice
+// .cpp:430-441 sets the last-6 vertex tex coords to (0..1, 0..1) over the full
+// source and the position rect to the full pixWidth × SCREEN_YSIZE viewport,
+// so SDL_RenderCopy stretches the entire imageTexture across the screen).
+// Mania.ogv is 1024×512; without this scale the inner ~7% of the frame would
+// land 1:1 in our 320×224 / 424×224 dest and the intro would look drastically
+// zoomed in.
 static inline uint16 pack_rgb565(int r, int g, int b)
 {
     // r,g,b are already clamped to [0,255] by the caller.
@@ -406,44 +410,29 @@ static inline uint16 yuv601_to_rgb565(int y, int u, int v)
     return pack_rgb565(r, g, b);
 }
 
-// Compute centered destination rect for a source of (sw,sh) drawn into a
-// destination of (dw,dh). On output:
-//   *dx, *dy    -- top-left destination cell offset (>=0)
-//   *sx, *sy    -- top-left source cell offset (>=0; nonzero when sw>dw or sh>dh)
-//   *copy_w, *copy_h -- visible intersection in cells (<= min(sw,dw), etc.)
-// The caller must clear the destination first if border fill is desired.
-static inline void compute_dest_rect(int sw, int sh, int dw, int dh,
-                                     int *dx, int *dy, int *sx, int *sy,
-                                     int *copy_w, int *copy_h)
+// 16.16 fixed-point step from src to dst for nearest-neighbor stretch.
+// Returns the source coord increment per dst-pixel (>>16 to recover the
+// source index). Caller guarantees src_dim > 0 and dst_dim > 0.
+static inline uint32_t nn_step(int src_dim, int dst_dim)
 {
-    if (sw >= dw) { *sx = (sw - dw) / 2; *dx = 0;            *copy_w = dw; }
-    else          { *sx = 0;             *dx = (dw - sw) / 2; *copy_w = sw; }
-    if (sh >= dh) { *sy = (sh - dh) / 2; *dy = 0;            *copy_h = dh; }
-    else          { *sy = 0;             *dy = (dh - sh) / 2; *copy_h = sh; }
+    return (uint32_t)(((uint64_t)(uint32_t)src_dim << 16) / (uint32_t)dst_dim);
 }
 
 void RenderDevice::SetupImageTexture(int32 width, int32 height, uint8 *imagePixels)
 {
     // RGBA8888 -> RGB565 into screens[0].frameBuffer. Used by SHADER_RGB_IMAGE
-    // (LoadImage / title cards). Source is always 1024x512 per Sprite.cpp:1001,
-    // 1026 (the engine logs an error and skips the call otherwise) but we
-    // honor whatever (width, height) the engine hands us. Center-crop or
-    // letterbox to the runtime display dims; no bilinear scaling.
+    // (LoadImage / CESA splash / UIVideo thumbnails). Source is always 1024x512
+    // per Sprite.cpp:1001, 1026 (the engine logs an error and skips the call
+    // otherwise). Stretch source to fill dest with nearest-neighbor sampling.
     if (!imagePixels) return;
+    if (width <= 0 || height <= 0) return;
 
     const int dst_w   = screens[0].size.x;
     const int dst_h   = screens[0].size.y;
     const int dst_pit = screens[0].pitch;  // uint16 cells per row
 
-    int dx, dy, sx, sy, cw, ch;
-    compute_dest_rect(width, height, dst_w, dst_h, &dx, &dy, &sx, &sy, &cw, &ch);
-
-    // Clear the entire framebuffer first so any letterbox border is black.
-    // Memset is fine for RGB565 black (0x0000).
-    memset(screens[0].frameBuffer, 0, (size_t)dst_pit * (size_t)dst_h * sizeof(uint16));
-
-    const uint8 *src_row = imagePixels + ((size_t)sy * width + sx) * 4u;
-    uint16      *dst_row = screens[0].frameBuffer + (size_t)dy * dst_pit + dx;
+    const uint32_t step_x = nn_step(width, dst_w);
+    const uint32_t step_y = nn_step(height, dst_h);
 
     // dim correction (BT.601 dim ramp from engine: 0.0 .. 1.0). videoSettings
     // is the namespace-level RSDK var; field defs are in Drawing.hpp:106-130.
@@ -452,38 +441,36 @@ void RenderDevice::SetupImageTexture(int32 width, int32 height, uint8 *imagePixe
     // value. Other backends apply dim per-frame in the shader using the live
     // dimMax/dimPercent — without a shader, achieving fade-in here would require
     // re-conversion every FlipScreen + a cached source. That is out-of-scope
-    // for this step (see "What NOT to do" / fade-in regression). We still
-    // multiply by current dim at call time so any future engine flow that
-    // sets dim before the call (or any non-zero state) is honored.
+    // for this step. We still multiply by current dim at call time so any
+    // future engine flow that sets dim before the call is honored.
     const float dim = videoSettings.dimMax * videoSettings.dimPercent;
-    // Pre-quantize once into [0,256] so the inner loop uses a single int mul.
     int dim_q = (int)(dim * 256.0f);
     if (dim_q < 0) dim_q = 0;
     if (dim_q > 256) dim_q = 256;
 
-    for (int y = 0; y < ch; ++y) {
-        const uint8 *s = src_row;
-        uint16      *d = dst_row;
-        for (int x = 0; x < cw; ++x) {
+    uint16 *drow = screens[0].frameBuffer;
+    uint32_t sy_fp = 0;
+    for (int y = 0; y < dst_h; ++y) {
+        int src_y = (int)(sy_fp >> 16);
+        if (src_y >= height) src_y = height - 1;
+        const uint8 *src_row = imagePixels + (size_t)src_y * (size_t)width * 4u;
+        uint16      *dp      = drow;
+        uint32_t sx_fp = 0;
+        for (int x = 0; x < dst_w; ++x) {
+            int src_x = (int)(sx_fp >> 16);
+            if (src_x >= width) src_x = width - 1;
             // Source byte order: ImagePNG::UnpackPixels_RGBA (Sprite.cpp:367-389)
-            // builds a uint32 as `(R<<16) | (G<<8) | (B<<0) | (A<<24)` using the
-            // _REDOFF/_GREENOFF/_BLUEOFF macros (Sprite.cpp:269-277, non-Android
-            // arm: R=16,G=8,B=0). On little-endian (ARMv7-A, x86_64, arm64) the
-            // uint32 is stored as bytes [B, G, R, A]. SDL2 reads the buffer as
-            // a uint32 stream into SDL_PIXELFORMAT_ARGB8888 (SDL2RenderDevice.cpp:
-            // 1058,1069-1072) where the value-form 0xAARRGGBB is interpreted
-            // correctly. We read bytewise here, so byte 0 is B, byte 1 is G,
-            // byte 2 is R, byte 3 is A. (See Phase 7 Step 7 plan review note.)
+            // packs as 0xAARRGGBB; on little-endian the bytes land [B, G, R, A].
+            const uint8 *s = src_row + (size_t)src_x * 4u;
             int b = s[0], g = s[1], r = s[2];
-            // Apply dim with a single 0..256 quantized multiply per channel.
             r = (r * dim_q) >> 8;
             g = (g * dim_q) >> 8;
             b = (b * dim_q) >> 8;
-            *d++ = pack_rgb565(r, g, b);
-            s += 4;
+            *dp++ = pack_rgb565(r, g, b);
+            sx_fp += step_x;
         }
-        src_row += (size_t)width * 4u;
-        dst_row += dst_pit;
+        drow += dst_pit;
+        sy_fp += step_y;
     }
 }
 
@@ -492,57 +479,39 @@ void RenderDevice::SetupVideoTexture_YUV420(int32 width, int32 height,
                                             int32 strideY, int32 strideU, int32 strideV)
 {
     if (!yPlane || !uPlane || !vPlane) return;
+    if (width <= 0 || height <= 0) return;
 
+    // NOTE: width/height are ENCODED plane dims (yuv[0].width/height per
+    // Video.cpp:253-254). For Mania.ogv these match the visible pic (1024x512
+    // luma plane, pic_x=pic_y=0). The engine pre-stepped {y,u,v}Plane to the
+    // pic origin (Video.cpp:254-256) so we can sample 0..width / 0..height
+    // freely. A future clip with encoded padding past the pic would alias the
+    // padding into the right/bottom edge.
     const int dst_w   = screens[0].size.x;
     const int dst_h   = screens[0].size.y;
     const int dst_pit = screens[0].pitch;
 
-    int dx, dy, sx, sy, cw, ch;
-    // NOTE: Engine passes ENCODED plane dims (yuv[0].width/height per
-    // Video.cpp:253-254), not visible-pic dims. For Mania.ogv these are equal
-    // (320x240, pic_x=pic_y=0). If a future clip has encoded padding or a
-    // non-zero pic origin this center-crop would mis-align by up to
-    // (plane_w - pic_w)/2. See architecture finding 3.
-    compute_dest_rect(width, height, dst_w, dst_h, &dx, &dy, &sx, &sy, &cw, &ch);
-    // Round source offsets down to even before computing chroma offsets so
-    // 4:2:0/4:2:2 chroma sampling stays aligned when (sw - dw) is odd.
-    sx &= ~1;
-    sy &= ~1;
+    const uint32_t step_x = nn_step(width, dst_w);
+    const uint32_t step_y = nn_step(height, dst_h);
 
-    // Letterbox border: only memset on the very first frame of a clip OR when
-    // dims would create a non-zero border; cheap-enough to do unconditionally
-    // on every frame given 320*240*2 = 153 600 B / frame and Cortex-A9
-    // memset bandwidth. Keeps the implementation branchless.
-    memset(screens[0].frameBuffer, 0, (size_t)dst_pit * (size_t)dst_h * sizeof(uint16));
-
-    // Chroma sub-sampled 2x2 for 4:2:0. The engine pre-stepped the chroma
-    // pointers by (pic_y >> 1, pic_x >> 1) in Video.cpp:255-257, so (sx,sy)
-    // here is in luma cells -- step chroma by (sx>>1, sy>>1).
-    const uint8 *yrow = yPlane + (size_t)sy * strideY + sx;
-    const uint8 *urow = uPlane + (size_t)(sy >> 1) * strideU + (sx >> 1);
-    const uint8 *vrow = vPlane + (size_t)(sy >> 1) * strideV + (sx >> 1);
-    uint16      *drow = screens[0].frameBuffer + (size_t)dy * dst_pit + dx;
-
-    for (int y = 0; y < ch; ++y) {
-        const uint8 *yp = yrow;
-        const uint8 *up = urow;
-        const uint8 *vp = vrow;
-        uint16      *dp = drow;
-        for (int x = 0; x + 1 < cw; x += 2) {
-            int u = up[0];
-            int v = vp[0];
-            dp[0] = yuv601_to_rgb565(yp[0], u, v);
-            dp[1] = yuv601_to_rgb565(yp[1], u, v);
-            yp += 2; dp += 2; up += 1; vp += 1;
+    uint16 *drow = screens[0].frameBuffer;
+    uint32_t sy_fp = 0;
+    for (int y = 0; y < dst_h; ++y) {
+        int src_y = (int)(sy_fp >> 16);
+        if (src_y >= height) src_y = height - 1;
+        const uint8 *yrow = yPlane + (size_t)src_y * strideY;
+        const uint8 *urow = uPlane + (size_t)(src_y >> 1) * strideU;
+        const uint8 *vrow = vPlane + (size_t)(src_y >> 1) * strideV;
+        uint16      *dp   = drow;
+        uint32_t sx_fp = 0;
+        for (int x = 0; x < dst_w; ++x) {
+            int src_x = (int)(sx_fp >> 16);
+            if (src_x >= width) src_x = width - 1;
+            *dp++ = yuv601_to_rgb565(yrow[src_x], urow[src_x >> 1], vrow[src_x >> 1]);
+            sx_fp += step_x;
         }
-        if (cw & 1) {
-            // Tail pixel when copy width is odd -- reuse the last chroma sample.
-            *dp = yuv601_to_rgb565(*yp, *up, *vp);
-        }
-        yrow += strideY;
-        // Chroma row only advances every other luma row.
-        if ((y & 1) == 1) { urow += strideU; vrow += strideV; }
         drow += dst_pit;
+        sy_fp += step_y;
     }
 }
 
@@ -551,45 +520,35 @@ void RenderDevice::SetupVideoTexture_YUV422(int32 width, int32 height,
                                             int32 strideY, int32 strideU, int32 strideV)
 {
     if (!yPlane || !uPlane || !vPlane) return;
+    if (width <= 0 || height <= 0) return;
 
+    // 4:2:2 -- chroma full vertical, halved horizontal. {y,u,v}Plane
+    // pre-stepped to pic origin by the engine (Video.cpp:241-249).
     const int dst_w   = screens[0].size.x;
     const int dst_h   = screens[0].size.y;
     const int dst_pit = screens[0].pitch;
 
-    int dx, dy, sx, sy, cw, ch;
-    // See YUV420 above re: width/height being encoded plane dims.
-    compute_dest_rect(width, height, dst_w, dst_h, &dx, &dy, &sx, &sy, &cw, &ch);
-    // Even-align sx so the chroma column lookup (sx >> 1) matches the luma sample.
-    sx &= ~1;
-    memset(screens[0].frameBuffer, 0, (size_t)dst_pit * (size_t)dst_h * sizeof(uint16));
+    const uint32_t step_x = nn_step(width, dst_w);
+    const uint32_t step_y = nn_step(height, dst_h);
 
-    // 4:2:2 -- chroma full vertical, halved horizontal. Chroma pointer
-    // pre-stepped by (pic_y, pic_x>>1) in Video.cpp:247-249, so (sx,sy) here
-    // is luma cells; step chroma by (sx>>1, sy).
-    const uint8 *yrow = yPlane + (size_t)sy * strideY + sx;
-    const uint8 *urow = uPlane + (size_t)sy * strideU + (sx >> 1);
-    const uint8 *vrow = vPlane + (size_t)sy * strideV + (sx >> 1);
-    uint16      *drow = screens[0].frameBuffer + (size_t)dy * dst_pit + dx;
-
-    for (int y = 0; y < ch; ++y) {
-        const uint8 *yp = yrow;
-        const uint8 *up = urow;
-        const uint8 *vp = vrow;
-        uint16      *dp = drow;
-        for (int x = 0; x + 1 < cw; x += 2) {
-            int u = up[0];
-            int v = vp[0];
-            dp[0] = yuv601_to_rgb565(yp[0], u, v);
-            dp[1] = yuv601_to_rgb565(yp[1], u, v);
-            yp += 2; dp += 2; up += 1; vp += 1;
+    uint16 *drow = screens[0].frameBuffer;
+    uint32_t sy_fp = 0;
+    for (int y = 0; y < dst_h; ++y) {
+        int src_y = (int)(sy_fp >> 16);
+        if (src_y >= height) src_y = height - 1;
+        const uint8 *yrow = yPlane + (size_t)src_y * strideY;
+        const uint8 *urow = uPlane + (size_t)src_y * strideU;
+        const uint8 *vrow = vPlane + (size_t)src_y * strideV;
+        uint16      *dp   = drow;
+        uint32_t sx_fp = 0;
+        for (int x = 0; x < dst_w; ++x) {
+            int src_x = (int)(sx_fp >> 16);
+            if (src_x >= width) src_x = width - 1;
+            *dp++ = yuv601_to_rgb565(yrow[src_x], urow[src_x >> 1], vrow[src_x >> 1]);
+            sx_fp += step_x;
         }
-        if (cw & 1) {
-            *dp = yuv601_to_rgb565(*yp, *up, *vp);
-        }
-        yrow += strideY;
-        urow += strideU;
-        vrow += strideV;
         drow += dst_pit;
+        sy_fp += step_y;
     }
 }
 
@@ -598,35 +557,35 @@ void RenderDevice::SetupVideoTexture_YUV444(int32 width, int32 height,
                                             int32 strideY, int32 strideU, int32 strideV)
 {
     if (!yPlane || !uPlane || !vPlane) return;
+    if (width <= 0 || height <= 0) return;
 
+    // 4:4:4 -- one chroma sample per luma sample. {y,u,v}Plane pre-stepped to
+    // pic origin by the engine (Video.cpp:241-243).
     const int dst_w   = screens[0].size.x;
     const int dst_h   = screens[0].size.y;
     const int dst_pit = screens[0].pitch;
 
-    int dx, dy, sx, sy, cw, ch;
-    // See YUV420 above re: width/height being encoded plane dims.
-    compute_dest_rect(width, height, dst_w, dst_h, &dx, &dy, &sx, &sy, &cw, &ch);
-    memset(screens[0].frameBuffer, 0, (size_t)dst_pit * (size_t)dst_h * sizeof(uint16));
+    const uint32_t step_x = nn_step(width, dst_w);
+    const uint32_t step_y = nn_step(height, dst_h);
 
-    // 4:4:4 -- one chroma sample per luma sample. Engine pre-stepped chroma
-    // by the full (pic_y, pic_x) in Video.cpp:241-243.
-    const uint8 *yrow = yPlane + (size_t)sy * strideY + sx;
-    const uint8 *urow = uPlane + (size_t)sy * strideU + sx;
-    const uint8 *vrow = vPlane + (size_t)sy * strideV + sx;
-    uint16      *drow = screens[0].frameBuffer + (size_t)dy * dst_pit + dx;
-
-    for (int y = 0; y < ch; ++y) {
-        const uint8 *yp = yrow;
-        const uint8 *up = urow;
-        const uint8 *vp = vrow;
-        uint16      *dp = drow;
-        for (int x = 0; x < cw; ++x) {
-            *dp++ = yuv601_to_rgb565(*yp++, *up++, *vp++);
+    uint16 *drow = screens[0].frameBuffer;
+    uint32_t sy_fp = 0;
+    for (int y = 0; y < dst_h; ++y) {
+        int src_y = (int)(sy_fp >> 16);
+        if (src_y >= height) src_y = height - 1;
+        const uint8 *yrow = yPlane + (size_t)src_y * strideY;
+        const uint8 *urow = uPlane + (size_t)src_y * strideU;
+        const uint8 *vrow = vPlane + (size_t)src_y * strideV;
+        uint16      *dp   = drow;
+        uint32_t sx_fp = 0;
+        for (int x = 0; x < dst_w; ++x) {
+            int src_x = (int)(sx_fp >> 16);
+            if (src_x >= width) src_x = width - 1;
+            *dp++ = yuv601_to_rgb565(yrow[src_x], urow[src_x], vrow[src_x]);
+            sx_fp += step_x;
         }
-        yrow += strideY;
-        urow += strideU;
-        vrow += strideV;
         drow += dst_pit;
+        sy_fp += step_y;
     }
 }
 
