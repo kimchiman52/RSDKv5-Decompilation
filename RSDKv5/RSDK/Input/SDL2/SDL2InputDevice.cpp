@@ -41,6 +41,45 @@ void RSDK::SKU::InputDeviceSDL::UpdateInput()
             this->buttonMasks |= keyMasks[i];
     }
 
+#if defined(RSDK_USE_MISTER)
+    // XInput-style radial deadzone (mirrors XInputDevice.cpp:55-65,70-80). The
+    // upstream SDL2 path normalizes raw int16 to [-1,1] with no deadzone, so a
+    // controller with a drifting L stick that idles near -10000 reads
+    // hDelta_L ≈ -0.305, which trips UFO_Player.c:229 (`stick->hDelta < -0.3`)
+    // and pulls the player constantly left in the Special Stage. MiSTer users
+    // tend to bring older / cheaper / multi-flavor controllers to the platform
+    // (no host driver to recalibrate), so apply the same 7864/24903 deadzone
+    // and rescale-to-[0,1] that XInput uses on Windows.
+    {
+        float fx = (float)SDL_GameControllerGetAxis(controllerPtr, SDL_CONTROLLER_AXIS_LEFTX);
+        float fy = (float)SDL_GameControllerGetAxis(controllerPtr, SDL_CONTROLLER_AXIS_LEFTY);
+        float div = sqrtf(fx * fx + fy * fy);
+        if (div <= 7864.0f) {
+            hDelta_L = 0.0f;
+            vDelta_L = 0.0f;
+        }
+        else {
+            float scale = (fminf(32767.0f, div) - 7864.0f) / 24903.0f;
+            hDelta_L = (fx / div) * scale;
+            vDelta_L = (fy / div) * scale;
+        }
+        vDelta_L = -vDelta_L;
+
+        fx  = (float)SDL_GameControllerGetAxis(controllerPtr, SDL_CONTROLLER_AXIS_RIGHTX);
+        fy  = (float)SDL_GameControllerGetAxis(controllerPtr, SDL_CONTROLLER_AXIS_RIGHTY);
+        div = sqrtf(fx * fx + fy * fy);
+        if (div <= 7864.0f) {
+            hDelta_R = 0.0f;
+            vDelta_R = 0.0f;
+        }
+        else {
+            float scale = (fminf(32767.0f, div) - 7864.0f) / 24903.0f;
+            hDelta_R = (fx / div) * scale;
+            vDelta_R = (fy / div) * scale;
+        }
+        vDelta_R = -vDelta_R;
+    }
+#else
     int32 delta = SDL_GameControllerGetAxis(controllerPtr, SDL_CONTROLLER_AXIS_LEFTX);
     if (delta < 0)
         hDelta_L = -NORMALIZE(-delta, 1, 32768);
@@ -66,6 +105,7 @@ void RSDK::SKU::InputDeviceSDL::UpdateInput()
     else
         vDelta_R = NORMALIZE(delta, 0, 32767);
     vDelta_R = -vDelta_R;
+#endif
 
     triggerDeltaL = NORMALIZE(SDL_GameControllerGetAxis(controllerPtr, SDL_CONTROLLER_AXIS_TRIGGERLEFT), 0, 32767);
     triggerDeltaR = NORMALIZE(SDL_GameControllerGetAxis(controllerPtr, SDL_CONTROLLER_AXIS_TRIGGERRIGHT), 0, 32767);
