@@ -2949,6 +2949,13 @@ void RSDK::Draw3DScene(uint16 sceneID)
                 for (int32 f = 0; f < scn->faceCount; ++f) {
                     Scene3DVertex *drawVert = &scn->vertices[scn->faceBuffer[f].index];
                     int32 vertCount         = *vertCnt;
+                    // Friend's diff added an indexed-vs-flat shared loop tail
+                    // that references `indexed` / `refs` regardless of the
+                    // RSDK_USE_MISTER guard. Provide stubs for non-MiSTer
+                    // builds so the tail compiles; engine still walks
+                    // `drawVert[c]` when indexed=false.
+                    const bool indexed     = false;
+                    const uint16 *refs     = NULL;
 #endif
 
 #if defined(RSDK_USE_MISTER)
