@@ -1,8 +1,19 @@
 #include "RSDK/Core/RetroEngine.hpp"
 
-// Phase 7 Step 4 (revised): MiSTer uses APP_DIR "./" directly for user
-// files AND data-pack lookup. See InitUserDirectory() RSDK_USE_MISTER
-// arm at ~line 1161 for rationale.
+// MiSTer uses APP_DIR "./" directly for userFileDir, which is the prefix
+// for Settings.ini, gamecontrollerdb.txt, log.txt, mods/, AND Data.rsdk
+// lookup. See InitUserDirectory() RSDK_USE_MISTER arm below for rationale
+// (an earlier "./saves/" attempt broke Data.rsdk lookup). Save-class
+// files (SaveData.bin, Replay_*.bin) are routed into a saves/ subdir by
+// LoadUserFile/SaveUserFile/DeleteUserFile via the helpers in the
+// anonymous namespace just above LoadUserFile — see the comment block
+// there. Github issue #4.
+
+#if defined(RSDK_USE_MISTER)
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#endif
 
 #if RETRO_REV02
 
@@ -1028,6 +1039,47 @@ void (*RSDK::SKU::preLoadSaveFileCB)();
 void (*RSDK::SKU::postLoadSaveFileCB)();
 char RSDK::SKU::userFileDir[0x100];
 
+#if defined(RSDK_USE_MISTER)
+namespace {
+// MiSTer save-class redirect.
+//
+// LoadUserFile/SaveUserFile/DeleteUserFile are the engine entry points
+// the game uses for SaveData.bin and Replay_*.bin (see SaveGame.c,
+// ReplayDB.c). On MiSTer, these belong under `<userFileDir>saves/`,
+// while every OTHER file routed through userFileDir — Settings.ini,
+// gamecontrollerdb.txt, log.txt, mods/, Data.rsdk lookup — stays at
+// the game root because those are config / static assets / engine
+// state, not user save data.
+//
+// Backwards compat: LoadUserFile and DeleteUserFile try saves/ first,
+// fall back to the game-root path if absent. SaveUserFile always writes
+// to saves/, mkdir'ing on demand. Old installs with SaveData.bin at the
+// game root keep loading until the next autosave, at which point the
+// file migrates forward automatically.
+//
+// The mod-loader branch (customUserFileDir non-empty) is left untouched
+// — those paths are scoped to per-mod state directories.
+static void mister_build_save_path(char *out, size_t cap, const char *filename)
+{
+    sprintf_s(out, cap, "%ssaves/%s", RSDK::SKU::userFileDir, filename);
+}
+
+static bool mister_path_exists(const char *path)
+{
+    struct stat st;
+    return ::stat(path, &st) == 0;
+}
+
+static void mister_ensure_saves_dir()
+{
+    char dir[0x200];
+    sprintf_s(dir, sizeof(dir), "%ssaves", RSDK::SKU::userFileDir);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+        RSDK::PrintLog(RSDK::PRINT_NORMAL, "MiSTer: mkdir(%s) failed: errno=%d", dir, errno);
+}
+} // namespace
+#endif
+
 bool32 RSDK::SKU::LoadUserFile(const char *filename, void *buffer, uint32 bufSize)
 {
     if (preLoadSaveFileCB)
@@ -1038,10 +1090,20 @@ bool32 RSDK::SKU::LoadUserFile(const char *filename, void *buffer, uint32 bufSiz
     if (strlen(customUserFileDir))
         sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", customUserFileDir, filename);
     else
-        sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
-#else
-    sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
 #endif
+    {
+        sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
+#if defined(RSDK_USE_MISTER)
+        // Save-class redirect: prefer userFileDir/saves/<filename>; the
+        // userFileDir/<filename> path computed above remains as a
+        // backwards-compat fallback for installs from before the
+        // migration. See comment at the top of the helper block.
+        char savesPath[0x400];
+        mister_build_save_path(savesPath, sizeof(savesPath), filename);
+        if (mister_path_exists(savesPath))
+            sprintf_s(fullFilePath, sizeof(fullFilePath), "%s", savesPath);
+#endif
+    }
     PrintLog(PRINT_NORMAL, "Attempting to load user file: %s", fullFilePath);
 
     FileIO *file = fOpen(fullFilePath, "rb");
@@ -1079,10 +1141,18 @@ bool32 RSDK::SKU::SaveUserFile(const char *filename, void *buffer, uint32 bufSiz
     if (strlen(customUserFileDir))
         sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", customUserFileDir, filename);
     else
-        sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
-#else
-    sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
 #endif
+    {
+#if defined(RSDK_USE_MISTER)
+        // Save-class write: always lands in userFileDir/saves/<filename>.
+        // mkdir on demand so the first save after a fresh install (or a
+        // saves/ deletion) succeeds without surprise.
+        mister_ensure_saves_dir();
+        mister_build_save_path(fullFilePath, sizeof(fullFilePath), filename);
+#else
+        sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
+#endif
+    }
     PrintLog(PRINT_NORMAL, "Attempting to save user file: %s", fullFilePath);
 
     FileIO *file = fOpen(fullFilePath, "wb");
@@ -1113,12 +1183,28 @@ bool32 RSDK::SKU::DeleteUserFile(const char *filename)
     if (strlen(customUserFileDir))
         sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", customUserFileDir, filename);
     else
-        sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
-#else
-    sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
 #endif
+        sprintf_s(fullFilePath, sizeof(fullFilePath), "%s%s", userFileDir, filename);
     PrintLog(PRINT_NORMAL, "Attempting to delete user file: %s", fullFilePath);
     int32 status = remove(fullFilePath);
+
+#if defined(RSDK_USE_MISTER)
+    // Save-class delete: also remove userFileDir/saves/<filename> so a
+    // user-initiated wipe (e.g. Time Attack delete-replay) clears both
+    // the new home AND any leftover legacy file at the game root, even
+    // if both happen to coexist. Skipped in mod context — mods own
+    // their own state directory.
+#if RETRO_USE_MOD_LOADER
+    if (!strlen(customUserFileDir))
+#endif
+    {
+        char savesPath[0x400];
+        mister_build_save_path(savesPath, sizeof(savesPath), filename);
+        int32 saves_status = remove(savesPath);
+        if (saves_status == 0)
+            status = 0;  // success if either path was unlinked
+    }
+#endif
 
     if (postLoadSaveFileCB)
         postLoadSaveFileCB();
@@ -1155,24 +1241,19 @@ void RSDK::SKU::InitUserDirectory()
 {
 #if defined(RSDK_USE_MISTER)
 
-    // MiSTer: use APP_DIR directly for user files AND data-pack lookup.
-    // userFileDir is the prefix for ALL file I/O in RSDKv5 — both save
-    // data (SGame.bin, Replay_*.bin, Settings.ini, log.txt,
-    // gamecontrollerdb.txt) AND data-pack lookup (Data.rsdk). See
-    // UserCore.cpp:313 LoadDataPack(..., "Data.rsdk", ...) which also
-    // goes through userFileDir via the RSDK storage layer.
-    //
-    // Earlier Phase 7 attempt used "./saves/" to isolate saves from the
-    // release-zip upgrade path. That broke Data.rsdk lookup because the
-    // engine doesn't split user-save vs data-pack dirs — both flow
-    // through userFileDir. Revert to "./" (same as generic Linux arm at
-    // line 1193) so Data.rsdk at APP_DIR root is found. Save/upgrade
-    // collision concern is deferred.
+    // MiSTer: APP_DIR ("./") is the userFileDir prefix for everything
+    // EXCEPT save-class files. userFileDir backs Settings.ini,
+    // gamecontrollerdb.txt, log.txt, mods/, and Data.rsdk lookup
+    // (UserCore.cpp:313 LoadDataPack(..., "Data.rsdk", ...)) — these all
+    // belong at the game root. Save-class files (SaveData.bin,
+    // Replay_*.bin) are redirected into <userFileDir>saves/ inside
+    // LoadUserFile/SaveUserFile/DeleteUserFile (see the helper block
+    // just above LoadUserFile). That split lets Data.rsdk live at the
+    // game root without the Phase-7 "./saves/" regression.
     //
     // This arm MUST come before the RETRO_LINUX arm because MiSTer also
     // reports RETRO_PLATFORM == RETRO_LINUX; the explicit short-circuit
-    // keeps the MiSTer-specific intent visible in the source even
-    // though the current value matches the Linux fallback.
+    // keeps the MiSTer-specific intent visible.
     SKU::SetUserFileCallbacks("./", NULL, NULL);
 
 #elif RETRO_PLATFORM == RETRO_OSX
