@@ -12,6 +12,7 @@
 #if defined(RSDK_USE_MISTER)
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 #include <errno.h>
 #endif
 
@@ -1066,8 +1067,10 @@ static void mister_build_save_path(char *out, size_t cap, const char *filename)
 
 static bool mister_path_exists(const char *path)
 {
-    struct stat st;
-    return ::stat(path, &st) == 0;
+    // access() rather than stat(): 32-bit stat() fails with EOVERFLOW on
+    // CIFS mounts whose 64-bit inode numbers don't fit st_ino, which made
+    // the saves/ lookup always miss.
+    return ::access(path, F_OK) == 0;
 }
 
 static void mister_ensure_saves_dir()
